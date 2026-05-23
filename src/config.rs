@@ -36,7 +36,7 @@ pub(crate) const POWER_CURVE_MIN_BUCKETS: usize = 6;
 /// 1.005 = next gear must deliver at least 0.5 % more power.
 /// Prevents premature shifts on flat power curves (EVs, turbo plateau, noisy data).
 pub(crate) const SHIFT_POWER_GAIN_RATIO: f64 = 1.005;
-pub(crate) const SHIFT_CACHE_STRATEGY_VERSION: i64 = 5; // bump when the shift strategy changes to force a recalculation
+pub(crate) const SHIFT_CACHE_STRATEGY_VERSION: i64 = 6; // bump when the shift strategy changes to force a recalculation
 pub(crate) const MAX_PLAUSIBLE_LEARNED_GEAR: i64 = 10;
 pub(crate) const SHIFT_DROP_MIN_RATIO: f64 = 0.35;
 pub(crate) const SHIFT_DROP_MAX_RATIO: f64 = 0.92;
@@ -91,4 +91,8 @@ pub(crate) struct Args {
     /// Log limiter-bounce detection to stdout (counters, confirmations, corrections).
     #[arg(long)]
     pub(crate) limiter_log: bool,
+    /// Verbose per-packet debug log for the limiter zone (rpm, throttle, thresholds, bounce state).
+    /// Prints one line per packet whenever RPM exceeds 80 % of maxRpm.
+    #[arg(long)]
+    pub(crate) limiter_debug: bool,
 }

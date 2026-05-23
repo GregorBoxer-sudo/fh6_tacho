@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
         root.join("data/power_curves.json"),
         logger,
         args.limiter_log,
+        args.limiter_debug,
     ));
     let hub = Arc::new(TelemetryHub::new());
     let recorder = Arc::new(TelemetryRecorder::new(root.join("data/drive_sessions"))?);

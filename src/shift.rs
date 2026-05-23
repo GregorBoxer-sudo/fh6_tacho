@@ -15,6 +15,7 @@ pub(crate) struct PowerCurveStore {
     curves: Mutex<Map<String, Value>>,
     logger: Option<Arc<ShiftCacheLogger>>,
     limiter_log: bool,
+    limiter_debug: bool,
 }
 
 impl PowerCurveStore {
@@ -22,6 +23,7 @@ impl PowerCurveStore {
         path: impl Into<PathBuf>,
         logger: Option<Arc<ShiftCacheLogger>>,
         limiter_log: bool,
+        limiter_debug: bool,
     ) -> Self {
         let path = path.into();
         let curves = fs::read_to_string(&path)
@@ -34,6 +36,7 @@ impl PowerCurveStore {
             curves: Mutex::new(curves),
             logger,
             limiter_log,
+            limiter_debug,
         }
     }
 
@@ -93,6 +96,8 @@ impl PowerCurveStore {
             "idleRpmSignature".to_string(),
             json!(get_child_f64(engine, "idleRpm")),
         );
+        curve.insert("gearPeakRpm".to_string(), json!({}));
+        curve.insert("bounceConfirmedLimit".to_string(), json!(0.0));
         curve.insert("updatedAt".to_string(), json!(now_seconds()));
     }
 
@@ -158,7 +163,7 @@ impl PowerCurveStore {
         }
     }
 
-    fn update_observed_limit(&self, payload: &Value) -> (f64, i64) {
+    fn update_observed_limit(&self, payload: &Value) -> (f64, i64, f64) {
         let key = power_curve_key(payload);
         let gear = learned_forward_gear(payload);
         let rpm = get_f64(payload, &["engine", "rpm"]);
@@ -166,10 +171,10 @@ impl PowerCurveStore {
         let max_rpm = get_f64(payload, &["engine", "maxRpm"]).max(3000.0);
         let accel = get_f64(payload, &["controls", "accel"]);
         if key.is_empty() || gear <= 0 || rpm < 1500.0 {
-            return (0.0, 0);
+            return (0.0, 0, 0.0);
         }
         let mut curves = self.curves.lock().unwrap();
-        let (observed, bounce_count, should_save) = {
+        let (observed, bounce_count, bounce_confirmed, should_save) = {
             let curve = Self::curve_mut(&mut curves, &key);
             let previous = curve.get("lastLimitSample").unwrap_or(&Value::Null);
             let previous_gear = get_child_i64(previous, "gear");
@@ -201,14 +206,73 @@ impl PowerCurveStore {
                 }
             }
 
+            // Track per-gear full-throttle peak RPM so we can identify power-limited
+            // gears where the car tops out well below max_rpm.
+            let gear_peak_key = gear.to_string();
+            if accel >= FULL_THROTTLE_MIN {
+                let prev_peak = curve
+                    .get("gearPeakRpm")
+                    .and_then(Value::as_object)
+                    .and_then(|p| p.get(&gear_peak_key))
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                if rpm > prev_peak {
+                    ensure_object(curve, "gearPeakRpm")
+                        .insert(gear_peak_key.clone(), json!(rpm));
+                }
+            }
+            let gear_peak = curve
+                .get("gearPeakRpm")
+                .and_then(Value::as_object)
+                .and_then(|p| p.get(&gear_peak_key))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+
             // Limiter bounce detection: at full throttle and high RPM, look for the
             // characteristic oscillation at the rev limiter and use it to correct
             // maxObservedRpm downward if needed.
-            let high_rpm_threshold = max_rpm * LIMIT_LEARN_HIGH_RPM_RATIO;
+            //
+            // For power-limited gears (car tops out at < 96 % of the global limit),
+            // use the gear's own ceiling for the detection zone so the oscillation
+            // is captured even though it lies below the global threshold.
+            let is_power_limited_gear = gear_peak > 0.0 && gear_peak < current_baseline * 0.96;
+            let high_rpm_threshold = if is_power_limited_gear {
+                gear_peak * LIMIT_LEARN_HIGH_RPM_RATIO
+            } else {
+                max_rpm * LIMIT_LEARN_HIGH_RPM_RATIO
+            };
             let prev_bounce_count = get_child_i64(
                 &curve.get("limiterBounce").cloned().unwrap_or(Value::Null),
                 "count",
             );
+
+            // --limiter-debug: print one line per packet when RPM is high enough to
+            // be interesting, showing every value that feeds into the detection logic.
+            if self.limiter_debug && rpm >= max_rpm * 0.80 {
+                let bounce_state = curve.get("limiterBounce").cloned().unwrap_or(Value::Null);
+                let b_count  = get_child_i64(&bounce_state, "count");
+                let b_dir    = get_child_f64(&bounce_state, "dir");
+                let b_ref    = get_child_f64(&bounce_state, "refRpm");
+                let cur_max  = get_curve_f64(curve, "maxObservedRpm");
+                let in_zone  = accel >= FULL_THROTTLE_MIN && rpm >= high_rpm_threshold;
+                let reason   = if accel < FULL_THROTTLE_MIN {
+                    format!("throttle={:.3} < {:.2} (not full)", accel, FULL_THROTTLE_MIN)
+                } else if rpm < high_rpm_threshold {
+                    format!("rpm={:.0} < threshold={:.0}", rpm, high_rpm_threshold)
+                } else {
+                    "IN ZONE".to_string()
+                };
+                println!(
+                    "[limiter:dbg] car={key} g={gear} rpm={:.0} max={:.0} accel={:.3} \
+                     threshold={:.0}({}) gearPeak={:.0} observedMax={:.0} zone:{} \
+                     bounce(count={b_count} dir={b_dir:+.0} ref={b_ref:.0})",
+                    rpm, max_rpm, accel, high_rpm_threshold,
+                    if is_power_limited_gear { "gear" } else { "global" },
+                    gear_peak, cur_max,
+                    if in_zone { &reason } else { &reason },
+                );
+            }
+
             if accel >= FULL_THROTTLE_MIN && rpm >= high_rpm_threshold {
                 if let Some(detected) = detect_limiter_bounce(curve, rpm, now) {
                     let current_max = get_curve_f64(curve, "maxObservedRpm");
@@ -218,16 +282,22 @@ impl PowerCurveStore {
                         println!(
                             "[limiter] confirmed  car={key} g={gear} detected={:.0} current_max={:.0} {}",
                             detected, current_max,
-                            if needs_down { "-> DOWN" } else if needs_up { "-> UP" } else { "(no change)" }
+                            if needs_up { "-> UP" }
+                            else if needs_down { "-> DOWN" }
+                            else { "(no change)" }
                         );
                     }
-                    if needs_down || needs_up {
+                    if needs_up || needs_down {
                         curve.insert("maxObservedRpm".to_string(), json!(detected));
                         curve.insert("savedMaxObservedRpm".to_string(), json!(detected));
                         curve.insert("updatedAt".to_string(), json!(now_seconds()));
                         if needs_down {
+                            // The rev limiter is a global engine property — record the
+                            // confirmed value so rpm_reference can apply it to all gears
+                            // even if they haven't been driven to the limiter yet.
+                            curve.insert("bounceConfirmedLimit".to_string(), json!(detected));
                             // Saved shift points were based on the old (incorrect) limit,
-                            // so mark them dirty to force a recalculation with the corrected value.
+                            // so mark them dirty to force a recalculation.
                             mark_shift_cache_dirty(curve, None);
                         }
                         should_save = true;
@@ -253,12 +323,15 @@ impl PowerCurveStore {
 
             let bounce_state = curve.get("limiterBounce").cloned().unwrap_or(Value::Null);
             let bounce_count = get_child_i64(&bounce_state, "count");
-            (get_curve_f64(curve, "maxObservedRpm"), bounce_count, should_save)
+            // Return the bounce-confirmed global rev limit so rpm_reference can apply it
+            // to all gears without requiring each gear to be individually driven to its ceiling.
+            let bounce_confirmed = get_curve_f64(curve, "bounceConfirmedLimit");
+            (get_curve_f64(curve, "maxObservedRpm"), bounce_count, bounce_confirmed, should_save)
         };
         if should_save {
             self.save_locked(&curves);
         }
-        (observed, bounce_count)
+        (observed, bounce_count, bounce_confirmed)
     }
 
 
@@ -728,12 +801,13 @@ fn interpolated_power(points: &[CurvePoint], rpm: f64) -> Option<f64> {
 
 pub(crate) fn enrich_shift_data(payload: &mut Value, power_curves: Option<&Arc<PowerCurveStore>>) {
     let mut observed_limit = 0.0;
+    let mut bounce_confirmed = 0.0;
     let mut max_observed_gear = if is_electric(payload) { 1 } else { 0 };
     let rpm_rate;
     let mut bounce_count = 0i64;
     if let Some(store) = power_curves {
         store.validate_profile(payload);
-        (observed_limit, bounce_count) = store.update_observed_limit(payload);
+        (observed_limit, bounce_count, bounce_confirmed) = store.update_observed_limit(payload);
         max_observed_gear = store.update_observed_gear(payload);
         store.learn_shift_drop(payload);
         rpm_rate = store.update_rpm_rise_rate(payload);
@@ -741,7 +815,7 @@ pub(crate) fn enrich_shift_data(payload: &mut Value, power_curves: Option<&Arc<P
         rpm_rate = 0.0;
     }
 
-    let (limit_rpm, redline_rpm) = rpm_reference(payload, observed_limit);
+    let (limit_rpm, redline_rpm) = rpm_reference(payload, observed_limit, bounce_confirmed);
     let safety_ratio = safety_shift_target_ratio(payload);
     let safety_shift_rpm = limit_rpm * safety_ratio;
     let warning_lead_seconds = shift_warning_lead_seconds(payload);
@@ -920,7 +994,7 @@ fn detect_limiter_bounce(curve: &mut Map<String, Value>, rpm: f64, now: f64) -> 
     detected
 }
 
-fn rpm_reference(payload: &Value, observed_limit: f64) -> (f64, f64) {
+fn rpm_reference(payload: &Value, observed_limit: f64, bounce_confirmed: f64) -> (f64, f64) {
     let idle = get_f64(payload, &["engine", "idleRpm"]).max(0.0);
     let max_rpm = get_f64(payload, &["engine", "maxRpm"]).max(3000.0);
     // Without real drive data, use the conservative initial estimate (94 % vs 89.5 %).
@@ -936,7 +1010,21 @@ fn rpm_reference(payload: &Value, observed_limit: f64) -> (f64, f64) {
     // Cap observedLimit at MAX_OBSERVED_LIMIT_RATIO to prevent an RPM spike from pushing
     // limit_rpm all the way to maxRpm and eliminating the safety margin.
     let capped_observed = observed_limit.min(max_rpm * MAX_OBSERVED_LIMIT_RATIO_OF_TACHO_MAX);
-    let limit_rpm = (idle + 1000.0).max(estimated_limit).max(capped_observed);
+    let base_limit = (idle + 1000.0).max(estimated_limit).max(capped_observed);
+    // When bounce detection has confirmed the actual rev limiter AND the highest observed
+    // RPM is consistent with that value (i.e. no other gear has driven significantly past
+    // it), trust the confirmed limit over the theoretical floor.  The rev limiter is a
+    // global engine property — confirming it in gear 1 is enough to apply it to all gears.
+    // If the car later reaches higher RPM in another gear the bounce_confirmed value is
+    // superseded (observed_limit > bounce_confirmed * 1.06 → condition fails).
+    let limit_rpm = if bounce_confirmed > 0.0
+        && bounce_confirmed < base_limit
+        && observed_limit <= bounce_confirmed * 1.06
+    {
+        bounce_confirmed.max(idle + 1000.0)
+    } else {
+        base_limit
+    };
     let redline_rpm = (idle + 1000.0).max(limit_rpm * REDLINE_RATIO_OF_ENGINE_LIMIT);
     (limit_rpm, redline_rpm)
 }
@@ -1210,7 +1298,7 @@ mod tests {
     #[test]
     fn rpm_reference_no_observed_uses_initial_ratio() {
         let payload = payload_with_engine(8000.0, 750.0);
-        let (limit, _redline) = rpm_reference(&payload, 0.0);
+        let (limit, _redline) = rpm_reference(&payload, 0.0, 0.0);
         // Initial ratio = 0.94 → estimated = 8000 * 0.94 = 7520
         // limit = max(idle+1000=1750, 7520) = 7520
         assert!((limit - 7520.0).abs() < 1.0, "limit={limit}");
@@ -1222,7 +1310,7 @@ mod tests {
         // observed_limit > 0 → DEFAULT ratio used (0.895) → estimated=7160
         // capped observed = min(7800, 8000*0.97=7760) = 7760
         // limit = max(1750, 7160, 7760) = 7760
-        let (limit, _) = rpm_reference(&payload, 7800.0);
+        let (limit, _) = rpm_reference(&payload, 7800.0, 0.0);
         assert!((limit - 7760.0).abs() < 1.0, "limit={limit}");
     }
 
@@ -1230,7 +1318,27 @@ mod tests {
     fn rpm_reference_observed_limit_capped_at_97_percent() {
         let payload = payload_with_engine(8000.0, 750.0);
         // observed_limit = 8000 (at 100%) → capped at 97% = 7760
-        let (limit, _) = rpm_reference(&payload, 8000.0);
+        let (limit, _) = rpm_reference(&payload, 8000.0, 0.0);
+        assert!((limit - 7760.0).abs() < 1.0, "limit={limit}");
+    }
+
+    #[test]
+    fn rpm_reference_bounce_confirmed_overrides_floor() {
+        let payload = payload_with_engine(8000.0, 750.0);
+        // bounce_confirmed=6755, observed=6755 — rev limiter confirmed below theoretical floor
+        // estimated floor = 8000*0.895 = 7160, but bounce_confirmed < base AND
+        // observed (6755) <= 6755*1.06 (7160) → use bounce_confirmed
+        let (limit, _) = rpm_reference(&payload, 6755.0, 6755.0);
+        assert!((limit - 6755.0).abs() < 1.0, "limit={limit}");
+    }
+
+    #[test]
+    fn rpm_reference_bounce_ignored_when_higher_rpm_observed() {
+        let payload = payload_with_engine(8000.0, 750.0);
+        // bounce_confirmed=6755 but car reached 7800 in another gear → power limitation,
+        // not rev limiter. 7800 > 6755*1.06=7160 → ignore bounce_confirmed, use standard limit
+        let (limit, _) = rpm_reference(&payload, 7800.0, 6755.0);
+        // capped_observed = min(7800, 7760) = 7760
         assert!((limit - 7760.0).abs() < 1.0, "limit={limit}");
     }
 
