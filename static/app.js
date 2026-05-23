@@ -333,15 +333,29 @@ function shiftFlashState(currentRpm, shiftNowRpm, gear) {
   return shiftFlashActive;
 }
 
-function updateGMeter(motion) {
-  const lat = clamp(motion?.gLat || 0, -2.5, 2.5);
+function updateGMeter(motion, speed) {
+  const kmh = speed?.kmh || 0;
+  const isStationary = kmh < 2;
+
+  const rawLat  = motion?.gLat  || 0;
   const rawLong = motion?.gLong || 0;
+
+  // Update the longitudinal baseline to cancel Forza's static gravity/slope offset.
+  // While stationary: converge quickly (~15 % per frame at 60 Hz ≈ ~1 s to settle).
+  // While moving: only correct slowly when the value is already close to baseline,
+  // so genuine acceleration isn't silently zeroed out.
   if (gLongBaseline === null) {
     gLongBaseline = rawLong;
+  } else if (isStationary) {
+    gLongBaseline = gLongBaseline * 0.85 + rawLong * 0.15;
   } else if (Math.abs(rawLong - gLongBaseline) < 0.08) {
     gLongBaseline = gLongBaseline * 0.995 + rawLong * 0.005;
   }
-  const long = clamp(rawLong - gLongBaseline, -2.5, 2.5);
+
+  // Below 2 km/h the car is stationary — clamp both axes to zero so gravity
+  // noise and Forza's static bias never show as phantom G-force.
+  const lat  = isStationary ? 0 : clamp(rawLat,               -2.5, 2.5);
+  const long = isStationary ? 0 : clamp(rawLong - gLongBaseline, -2.5, 2.5);
   const total = Math.hypot(lat, long);
   peakG = Math.max(total, peakG * PEAK_G_DECAY);
 
@@ -454,8 +468,8 @@ function render(now) {
   const rpmRatio = rpm.ratio;
   els.rpmFill.style.width = `${rpmRatio * 100}%`;
   els.rpmFill.style.filter = rpmRatio > 0.92 ? "saturate(1.7) brightness(1.2)" : "";
-  // LEDs skalieren auf 97 % von shiftNowRpm, damit die letzte LED
-  // etwas vor dem Blink-Beginn aufleuchtet (kurzes "alle an, noch kein Blinken").
+  // LEDs scale to 97 % of shiftNowRpm so the last LED lights up just before
+  // blinking starts (brief "all on, not yet blinking" state).
   const ledFull = rpm.shiftNowRpm > 0 ? rpm.shiftNowRpm * 0.97 : 0;
   const ledRatio = ledFull > 0
     ? clamp(latest.engine.rpm / ledFull, 0, 1)
@@ -488,7 +502,7 @@ function render(now) {
   els.lapTime.textContent = lapTime(latest.lap.current, true);
   els.bestLap.textContent = lapTime(latest.lap.best);
   updateLapDerived(latest.lap);
-  updateGMeter(latest.motion);
+  updateGMeter(latest.motion, latest.speed);
   updateDrift(latest);
 
   updateTire(els.tires.fl, latest.tireTempC.fl);
