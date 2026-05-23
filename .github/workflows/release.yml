@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ── Linux (native, Ubuntu 22.04 for broad glibc compatibility) ──────────────
+  # ── Linux (Ubuntu 22.04 for broad glibc compatibility) ──────────────────────
   build-linux:
     runs-on: ubuntu-22.04
     steps:
@@ -38,7 +38,7 @@ jobs:
           name: linux
           path: forza-tacho-linux-x86_64
 
-  # ── Windows (native runner — avoids MinGW cross-compile quirks) ─────────────
+  # ── Windows (native runner) ──────────────────────────────────────────────────
   build-windows:
     runs-on: windows-latest
     steps:
@@ -54,9 +54,39 @@ jobs:
           name: windows
           path: target/release/forza-tacho.exe
 
+  # ── macOS universal binary (Intel + Apple Silicon) ───────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build ARM (Apple Silicon)
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build Intel
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          lipo -create \
+            target/aarch64-apple-darwin/release/forza-tacho \
+            target/x86_64-apple-darwin/release/forza-tacho \
+            -output forza-tacho-macos
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: forza-tacho-macos
+
   # ── Create GitHub Release ────────────────────────────────────────────────────
   release:
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -71,6 +101,11 @@ jobs:
           name: windows
           path: artifacts
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos
+          path: artifacts
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -78,3 +113,4 @@ jobs:
           files: |
             artifacts/forza-tacho-linux-x86_64
             artifacts/forza-tacho.exe
+            artifacts/forza-tacho-macos

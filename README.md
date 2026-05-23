@@ -25,7 +25,9 @@ You get:
 Go to the **[Releases](../../releases)** page and download the right file for your system:
 
 - **Windows:** `forza-tacho.exe` — double-click it. A small window opens, that's the launcher.
-- **Linux:** `forza-tacho-linux-x86_64` — make it executable (`chmod +x`) and run it.
+- **Linux:** `forza-tacho-linux-x86_64` — make it executable (`chmod +x`) and run it.  
+  Works on any x86-64 desktop distro: Ubuntu, Fedora, Arch, CachyOS, Bazzite, Nobara, and others.
+- **macOS:** `forza-tacho-macos` — same as Linux. One file that runs natively on both Intel Macs and Apple Silicon (M1/M2/M3) — no separate downloads.
 
 ---
 
@@ -42,6 +44,10 @@ In Forza Horizon 6, go to:
 | Data Out IP Port | **5300** |
 
 The IP address is shown right in the launcher window — there's a copy button next to it.
+
+> **forza-tacho doesn't have to run on the same PC as Forza.**  
+> You can run it on any machine on the same network — a spare laptop, a Raspberry Pi, whatever.  
+> Point Forza's Data Out at that machine's IP, and open the dashboard from anywhere on the network.
 
 ---
 
@@ -161,7 +167,7 @@ Disk writes happen only when the power curve is updated (~every 0.3 s during lea
 ## Releases
 
 Releases are built automatically by GitHub Actions when a version tag is pushed.  
-Windows and Linux (x86-64) binaries are attached to every release. macOS is not currently supported.
+Windows, Linux (x86-64), and macOS (universal) binaries are attached to every release.
 
 To publish a new release:
 
@@ -195,6 +201,10 @@ sudo apt install libxkbcommon-dev libwayland-dev libegl-dev libgl1-mesa-dev
 ```
 
 On Fedora these are typically already present on a desktop install.
+
+### macOS universal binary
+
+The CI builds two separate binaries — one for Intel (`x86_64-apple-darwin`) and one for Apple Silicon (`aarch64-apple-darwin`) — then merges them into a single file using `lipo`. The result runs natively on both without Rosetta.
 
 ### Cross-compiling for Windows (from Linux)
 
