@@ -130,7 +130,10 @@ The rev limiter is detected by recognising the oscillation pattern it creates: a
 
 ## AI
 
-Parts of this project were developed with the help of [Claude](https://claude.ai) (Anthropic) — in particular the shift-learning algorithm, limiter-bounce detection, and test suite. All generated code was reviewed and integrated by the author.
+Parts of this project were developed with the help of AI tools — in particular the shift-learning algorithm, limiter-bounce detection, and test suite. All generated code was reviewed and integrated by the author.
+
+- [Claude](https://claude.ai) (Anthropic) — via Claude Code
+- [Codex](https://openai.com/codex) (OpenAI) — via GitHub Copilot / GitHub Codex
 
 ## License
 
