@@ -95,4 +95,8 @@ pub(crate) struct Args {
     /// Prints one line per packet whenever RPM exceeds 80 % of maxRpm.
     #[arg(long)]
     pub(crate) limiter_debug: bool,
+    /// Start without the graphical window (terminal-only mode).
+    /// Enabled automatically when no display is detected on Linux.
+    #[arg(long)]
+    pub(crate) no_gui: bool,
 }

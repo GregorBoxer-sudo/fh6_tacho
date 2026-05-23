@@ -15,6 +15,8 @@ pub(crate) struct TelemetryHub {
     pub(crate) tx: broadcast::Sender<String>,
     packet_count: Mutex<u64>,
     last_packet_at: Mutex<Option<std::time::Instant>>,
+    /// Most recent telemetry packet — used by the GUI overlay to read shift data.
+    last_value: Mutex<Option<Value>>,
 }
 
 impl TelemetryHub {
@@ -24,6 +26,7 @@ impl TelemetryHub {
             tx,
             packet_count: Mutex::new(0),
             last_packet_at: Mutex::new(None),
+            last_value: Mutex::new(None),
         }
     }
 
@@ -31,7 +34,14 @@ impl TelemetryHub {
         let message = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
         *self.packet_count.lock().unwrap() += 1;
         *self.last_packet_at.lock().unwrap() = Some(std::time::Instant::now());
+        *self.last_value.lock().unwrap() = Some(payload.clone());
         let _ = self.tx.send(message);
+    }
+
+    /// Returns the most recently received telemetry packet, or `None` if no
+    /// packet has been received yet.  Cheap clone of a small JSON value.
+    pub(crate) fn latest(&self) -> Option<Value> {
+        self.last_value.lock().unwrap().clone()
     }
 
     pub(crate) fn status(&self) -> Value {
