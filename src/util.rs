@@ -180,6 +180,57 @@ pub(crate) fn changed_bytes(previous: Option<&[u8]>, packet: &[u8]) -> Vec<usize
     changed
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn bucket_key_rounds_to_nearest_100() {
+        assert_eq!(bucket_key(3000.0), "3000");
+        assert_eq!(bucket_key(3049.9), "3000");
+        assert_eq!(bucket_key(3050.0), "3100");
+        assert_eq!(bucket_key(3099.9), "3100");
+        assert_eq!(bucket_key(6750.0), "6800");
+    }
+
+    #[test]
+    fn clamp_keeps_value_in_range() {
+        assert_eq!(clamp(5.0, 0.0, 10.0), 5.0);
+        assert_eq!(clamp(-1.0, 0.0, 10.0), 0.0);
+        assert_eq!(clamp(15.0, 0.0, 10.0), 10.0);
+        assert_eq!(clamp(0.0, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn get_f64_navigates_nested_path() {
+        let v = json!({ "engine": { "rpm": 6500.0 } });
+        assert!((get_f64(&v, &["engine", "rpm"]) - 6500.0).abs() < f64::EPSILON);
+        assert_eq!(get_f64(&v, &["engine", "missing"]), 0.0);
+        assert_eq!(get_f64(&v, &["missing", "key"]), 0.0);
+    }
+
+    #[test]
+    fn get_f64_accepts_integer_json_values() {
+        let v = json!({ "n": 42 });
+        assert!((get_f64(&v, &["n"]) - 42.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn get_child_f64_returns_zero_on_missing_key() {
+        let v = json!({ "x": 1.5 });
+        assert!((get_child_f64(&v, "x") - 1.5).abs() < f64::EPSILON);
+        assert_eq!(get_child_f64(&v, "y"), 0.0);
+    }
+
+    #[test]
+    fn round_to_snaps_to_step() {
+        assert!((round_to(3.14, 0.5) - 3.0).abs() < f64::EPSILON);
+        assert!((round_to(3.25, 0.5) - 3.5).abs() < f64::EPSILON);
+        assert!((round_to(100.0, 25.0) - 100.0).abs() < f64::EPSILON);
+    }
+}
+
 pub(crate) fn hex_string(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);

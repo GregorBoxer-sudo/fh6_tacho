@@ -133,7 +133,7 @@ function lapTime(value, allowZero = false) {
 }
 
 function displayLapNumber(data) {
-  // Forza liefert lap.number 0-basiert (Runde 1 = 0, Runde 2 = 1, ...)
+  // Forza delivers lap.number 0-based (Lap 1 = 0, Lap 2 = 1, ...)
   const rawLap = Number(data.lap?.number) ?? -1;
   if (rawLap >= 0 && data.raceOn) return int(rawLap + 1);
   const currentTime = Number(data.lap?.current) || 0;
@@ -214,11 +214,11 @@ function safetyShiftWarningRpm(shiftRpm, rpmRate, leadSeconds, idleRpm) {
     SHIFT_WARNING_MAX_DYNAMIC_GAP_RPM,
     usableBand * 0.35,
   );
-  // Fallback-Band-Gap als Untergrenze für den dynamischen Gap:
-  // Bei langsamem Hochdrehen (kleiner rpm_rate) würde clamp(rate*lead, 100, max)
-  // auf nur 100 RPM fallen – das kann direkt am echten Limiter liegen.
-  // Der Fallback-Band-Gap ist proportional zur nutzbaren RPM-Spanne und damit
-  // immer ein sinnvoller Mindestabstand.
+  // Fallback band gap as a floor for the dynamic gap:
+  // At slow rev build-up (small rpm_rate), clamp(rate*lead, 100, max)
+  // would collapse to only 100 RPM — dangerously close to the real limiter.
+  // The fallback band gap is proportional to the usable RPM band and therefore
+  // always a sensible minimum distance.
   const fallbackGap = clamp(
     usableBand * SAFETY_SHIFT_WARNING_FALLBACK_BAND_RATIO,
     SHIFT_WARNING_MIN_GAP_RPM,
@@ -235,7 +235,7 @@ function setConnection(live) {
   if (live === connected) return;
   connected = live;
   els.status.classList.toggle("live", live);
-  els.connection.textContent = live ? "live" : "keine daten";
+  els.connection.textContent = live ? "live" : "no data";
 }
 
 function updateTire(el, temp) {
@@ -387,18 +387,18 @@ function updateLapDerived(lap) {
   const lapNumber = Number(lap.number) || 0;
   const distance = Math.max(0, Number(lap.distance) || 0);
 
-  // Neues Rennen: lapNumber wechselt von >0 zurück auf 0 → Zustand zurücksetzen.
-  // Ohne diesen Reset würde lapStartDistance vom vorherigen Rennen übrig bleiben
-  // und currentLapDistance wäre 0 → progress=0 → delta wächst monoton von 0 auf ~Rundenzeit.
+  // New race: lapNumber switches from >0 back to 0 → reset state.
+  // Without this reset, lapStartDistance would carry over from the previous race
+  // and currentLapDistance would be 0 → progress=0 → delta grows monotonically from 0 to ~lap time.
   if (lastLapNumber > 0 && lapNumber === 0) {
     lastLapNumber = 0;
     lastLapDistance = 0;
     lapStartDistance = 0;
   }
 
-  // Init: erste erkennbare Runde nach Rennenstart (lapNumber wechselt von 0 auf >0).
-  // lapNumber===0 ist Forza-Runde 1; lapNumber===1 ist Runde 2 usw.
-  // Die 0-Runde braucht kein explizites Init (lapStartDistance=0, distance=0 → korrekt).
+  // Init: first recognisable lap after race start (lapNumber changes from 0 to >0).
+  // lapNumber===0 is Forza lap 1; lapNumber===1 is lap 2, etc.
+  // Lap 0 needs no explicit init (lapStartDistance=0, distance=0 → correct).
   if (lapNumber > 0 && lastLapNumber === 0) {
     lastLapNumber = lapNumber;
     lapStartDistance = distance;
@@ -505,7 +505,7 @@ function render(now) {
 function connect() {
   const source = new EventSource("/events");
   source.addEventListener("open", () => {
-    els.connection.textContent = "verbunden";
+    els.connection.textContent = "connected";
   });
   source.addEventListener("telemetry", (event) => {
     latest = JSON.parse(event.data);
@@ -556,7 +556,7 @@ if ("serviceWorker" in navigator) {
   });
 }
 
-// PWA-Navigation: interne Links im selben Fenster öffnen (fix für iOS standalone-Mode)
+// PWA navigation: open internal links in the same window (fix for iOS standalone mode)
 document.addEventListener("click", (e) => {
   const a = e.target.closest("a[href]");
   if (!a) return;

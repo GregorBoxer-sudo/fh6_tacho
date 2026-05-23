@@ -3,6 +3,8 @@
 A self-contained telemetry dashboard for Forza Horizon 6.  
 Open a browser, point Forza at your PC's IP, and get a real-time tachometer with a shift indicator that **learns the optimal shift point for every car you drive**.
 
+![Dashboard](docs/dashboard.png)
+
 ## Features
 
 - **Adaptive shift light** — not just "shift at X% of max RPM". The app learns each car's actual power curve at full throttle and calculates the RPM where shifting to the next gear gives more power.
@@ -10,6 +12,22 @@ Open a browser, point Forza at your PC's IP, and get a real-time tachometer with
 - **Session recorder** — every drive is saved as a JSONL file with speed, RPM, G-forces, lap times and more.
 - **Analytics dashboard** — browse past sessions and view per-car power curves in the browser.
 - **Single binary** — the web frontend is embedded at compile time. Nothing to install or copy alongside the executable.
+- **Works on any device** — open the dashboard on a phone or tablet on the same WiFi network. Installable as a PWA.
+- **Cross-platform** — native Windows `.exe` available; runs on Linux and macOS from source.
+
+## Performance
+
+Forza streams telemetry at **60 packets/second** (~324 bytes each). forza-tacho is built to handle this with negligible overhead:
+
+| Metric | Value |
+|--------|-------|
+| Processing time per packet | **< 1 ms** (parse + shift math + WebSocket push) |
+| Resident memory (steady state) | **~10–15 MB** (Tokio runtime + embedded web assets) |
+| CPU usage during active play | **< 1 %** on any modern CPU |
+| Disk writes | **Only on power curve updates** (~every 0.3 s during learning, idle at cruise) |
+| External dependencies at runtime | **Zero** — single binary, no database, no network calls |
+
+The hot path per packet is pure arithmetic (fixed-offset byte reads) and in-memory JSON operations behind a single mutex. Disk I/O is intentionally rare: saves happen every 20 samples during learning and are atomic (write-to-temp then rename). The release binary is compiled with `opt-level = 3`, LTO, and a single codegen unit.
 
 ## Quick start
 
@@ -109,6 +127,10 @@ The `data/` folder is created automatically on first run. Deleting it resets all
 On every full-throttle run the app samples power and RPM into 100-RPM buckets. Once enough buckets are filled it finds the RPM where the power gain from upshifting outweighs the loss — taking the actual gear-drop ratio (learned from your own upshifts) into account. The result is stored per car and updated continuously as you drive.
 
 The rev limiter is detected by recognising the oscillation pattern it creates: alternating small rises and drops around a fixed RPM ceiling. Once confirmed, the observed limit is used to tighten the safety shift point.
+
+## AI
+
+Parts of this project were developed with the help of [Claude](https://claude.ai) (Anthropic) — in particular the shift-learning algorithm, limiter-bounce detection, and test suite. All generated code was reviewed and integrated by the author.
 
 ## License
 

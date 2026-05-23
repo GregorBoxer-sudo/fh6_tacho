@@ -165,3 +165,115 @@ fn s8_at(packet: &[u8], offset: usize, default: i8) -> i8 {
         .map(|byte| *byte as i8)
         .unwrap_or(default)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal valid Forza standard-format packet (232 + 77 bytes).
+    /// Only the fields explicitly set carry meaningful values; everything else is zero.
+    fn make_standard_packet(
+        race_on: bool,
+        max_rpm: f32,
+        idle_rpm: f32,
+        rpm: f32,
+        ordinal: i32,
+        cylinders: i32,
+        speed_ms: f32,
+        power_w: f32,
+        gear: u8,
+        accel: u8,
+        brake: u8,
+    ) -> Vec<u8> {
+        let mut p = vec![0u8; 312];
+        // Sled block (starts at byte 0)
+        p[0..4].copy_from_slice(&(if race_on { 1i32 } else { 0i32 }).to_le_bytes());
+        p[8..12].copy_from_slice(&max_rpm.to_le_bytes());
+        p[12..16].copy_from_slice(&idle_rpm.to_le_bytes());
+        p[16..20].copy_from_slice(&rpm.to_le_bytes());
+        p[212..216].copy_from_slice(&ordinal.to_le_bytes());
+        p[228..232].copy_from_slice(&cylinders.to_le_bytes());
+        // Dash block starts at DASH_OFFSET_STANDARD = 232
+        p[244..248].copy_from_slice(&speed_ms.to_le_bytes());  // +12
+        p[248..252].copy_from_slice(&power_w.to_le_bytes());   // +16
+        // gear at 232+75=307, accel at 232+71=303, brake at 232+72=304
+        p[303] = accel;
+        p[304] = brake;
+        p[307] = gear;
+        p
+    }
+
+    #[test]
+    fn parse_standard_packet_basic_fields() {
+        let p = make_standard_packet(
+            true, 8000.0, 750.0, 6500.0,
+            42, 4, 50.0, 200_000.0, 3, 255, 0,
+        );
+        let v = parse_forza_dash(&p);
+
+        assert_eq!(v["raceOn"], serde_json::json!(true));
+
+        let rpm = v["engine"]["rpm"].as_f64().unwrap();
+        assert!((rpm - 6500.0).abs() < 1.0, "rpm={rpm}");
+
+        let max_rpm = v["engine"]["maxRpm"].as_f64().unwrap();
+        assert!((max_rpm - 8000.0).abs() < 1.0, "max_rpm={max_rpm}");
+
+        let kmh = v["speed"]["kmh"].as_f64().unwrap();
+        assert!((kmh - 50.0 * 3.6).abs() < 0.1, "kmh={kmh}");
+
+        let gear = v["controls"]["gear"].as_u64().unwrap();
+        assert_eq!(gear, 3);
+
+        let accel = v["controls"]["accel"].as_f64().unwrap();
+        assert!((accel - 1.0).abs() < 0.01, "accel={accel}");
+    }
+
+    #[test]
+    fn parse_too_short_packet_returns_default() {
+        // f32_at / i32_at must not panic on short slices; they return the default.
+        let p = vec![0u8; 20];
+        // Offset 17 needs bytes 17..21, but the slice is only 20 bytes → default
+        let rpm = f32_at(&p, 17, -1.0);
+        assert_eq!(rpm, -1.0);
+        // Offset 16 fits exactly (bytes 16..20) → reads the zero bytes as 0.0
+        let zero = f32_at(&p, 16, -1.0);
+        assert_eq!(zero, 0.0);
+    }
+
+    #[test]
+    fn f32_at_returns_default_for_nan_and_inf() {
+        let mut p = vec![0u8; 8];
+        // Write f32::NAN at offset 0
+        p[0..4].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert_eq!(f32_at(&p, 0, 99.0), 99.0);
+        // Write f32::INFINITY at offset 4
+        p[4..8].copy_from_slice(&f32::INFINITY.to_le_bytes());
+        assert_eq!(f32_at(&p, 4, 99.0), 99.0);
+    }
+
+    #[test]
+    fn parse_race_off_sets_flag_false() {
+        let p = make_standard_packet(
+            false, 8000.0, 750.0, 0.0,
+            1, 4, 0.0, 0.0, 0, 0, 0,
+        );
+        let v = parse_forza_dash(&p);
+        assert_eq!(v["raceOn"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn extended_format_detected_by_length_and_type_field() {
+        // If the packet is >= 324 bytes and byte 232 is non-zero, it uses the
+        // extended dash offset (244 instead of 232). Constructing a minimal
+        // extended packet and verifying the speed field is read from +12 of 244.
+        let mut p = vec![0u8; 324];
+        // Signal extended format: non-zero i32 at offset 232
+        p[232..236].copy_from_slice(&1i32.to_le_bytes());
+        // speed_ms at extended dash offset 244 + 12 = 256
+        p[256..260].copy_from_slice(&30.0f32.to_le_bytes());
+        let v = parse_forza_dash(&p);
+        let kmh = v["speed"]["kmh"].as_f64().unwrap();
+        assert!((kmh - 30.0 * 3.6).abs() < 0.1, "kmh={kmh}");
+    }
+}

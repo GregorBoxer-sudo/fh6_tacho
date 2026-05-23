@@ -1,16 +1,12 @@
 # Rust build output
 /target/
 
-# Gelernte Fahrzeugdaten und Fahraufzeichnungen – werden zur Laufzeit neu erstellt
-/data/power_curves.json
-/data/drive_sessions/
-
-# Temporäre Dateien vom atomaren Schreiben
-/data/*.tmp
+# Learned car data and drive recordings — recreated at runtime
+/data/
 
 # Logs
 /logs/
 
-# Distributions-Paket
+# Distribution package
 /dist/
 *.zip

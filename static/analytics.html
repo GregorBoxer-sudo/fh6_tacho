@@ -1,18 +1,18 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#05070b">
-    <title>Forza Analyse</title>
+    <title>Forza Analytics</title>
     <link rel="stylesheet" href="/style.css">
     <link rel="stylesheet" href="/analytics.css">
   </head>
   <body class="analyticsBody">
     <header class="analyticsTop">
-      <a class="topLink" href="/">Zurück</a>
-      <strong>Analyse</strong>
-      <button id="refreshBtn" type="button">Aktualisieren</button>
+      <a class="topLink" href="/">Back</a>
+      <strong>Analytics</strong>
+      <button id="refreshBtn" type="button">Refresh</button>
     </header>
 
     <main class="analyticsShell">
@@ -22,7 +22,7 @@
           <strong id="sessionCount">0</strong>
         </div>
         <div>
-          <span>Fahrzeuge</span>
+          <span>Cars</span>
           <strong id="carCount">0</strong>
         </div>
         <div>
@@ -45,12 +45,12 @@
 
         <section class="analyticsPane detailPane">
           <div class="paneHead">
-            <h1 id="detailTitle">Keine Session gewählt</h1>
+            <h1 id="detailTitle">No session selected</h1>
           </div>
           <div id="detailStats" class="statGrid"></div>
           <div id="chartTabs" class="chartTabs" style="display:none">
-            <button class="chartTab active" data-chart="shifts">Schaltpunkte</button>
-            <button class="chartTab" data-chart="power">Leistung &amp; Drehmoment</button>
+            <button class="chartTab active" data-chart="shifts">Shift Points</button>
+            <button class="chartTab" data-chart="power">Power &amp; Torque</button>
           </div>
           <canvas id="sessionChart" width="900" height="280"></canvas>
           <div id="lapInfo" class="infoStrip"></div>
@@ -58,7 +58,7 @@
 
         <aside class="analyticsPane">
           <div class="paneHead">
-            <h1>Fahrzeuge</h1>
+            <h1>Cars</h1>
           </div>
           <div id="carList" class="list"></div>
         </aside>

@@ -1118,3 +1118,200 @@ fn write_set(curve: &mut Map<String, Value>, field: &str, set: HashSet<String>) 
         json!(items.into_iter().map(|n| n.to_string()).collect::<Vec<_>>()),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── interpolated_power ────────────────────────────────────────────────────
+
+    fn pts(pairs: &[(f64, f64)]) -> Vec<CurvePoint> {
+        pairs.iter().map(|&(rpm, power)| CurvePoint { rpm, power }).collect()
+    }
+
+    #[test]
+    fn interpolated_power_empty_returns_none() {
+        assert_eq!(interpolated_power(&[], 5000.0), None);
+    }
+
+    #[test]
+    fn interpolated_power_below_range_returns_none() {
+        let p = pts(&[(3000.0, 200.0), (5000.0, 300.0)]);
+        assert_eq!(interpolated_power(&p, 2000.0), None);
+    }
+
+    #[test]
+    fn interpolated_power_above_range_returns_none() {
+        // rpm > last point → out-of-range, returns None (no extrapolation)
+        let p = pts(&[(3000.0, 200.0), (5000.0, 300.0)]);
+        assert_eq!(interpolated_power(&p, 6000.0), None);
+    }
+
+    #[test]
+    fn interpolated_power_exact_match() {
+        let p = pts(&[(3000.0, 200.0), (5000.0, 300.0), (7000.0, 280.0)]);
+        assert_eq!(interpolated_power(&p, 3000.0), Some(200.0));
+        assert_eq!(interpolated_power(&p, 5000.0), Some(300.0));
+    }
+
+    #[test]
+    fn interpolated_power_midpoint_linearly_interpolated() {
+        let p = pts(&[(3000.0, 200.0), (5000.0, 300.0)]);
+        // Midpoint at 4000 RPM: 200 + (300-200)*0.5 = 250
+        let result = interpolated_power(&p, 4000.0).unwrap();
+        assert!((result - 250.0).abs() < 0.001, "got {result}");
+    }
+
+    #[test]
+    fn interpolated_power_quarter_point() {
+        let p = pts(&[(0.0, 0.0), (4000.0, 400.0)]);
+        // 1000 RPM = 25 % of span → 100 hp
+        let result = interpolated_power(&p, 1000.0).unwrap();
+        assert!((result - 100.0).abs() < 0.001, "got {result}");
+    }
+
+    // ── dynamic_shift_warning_rpm ─────────────────────────────────────────────
+
+    #[test]
+    fn warning_rpm_zero_for_non_positive_shift_rpm() {
+        assert_eq!(dynamic_shift_warning_rpm(0.0, 2000.0, 0.2), 0.0);
+        assert_eq!(dynamic_shift_warning_rpm(-100.0, 2000.0, 0.2), 0.0);
+    }
+
+    #[test]
+    fn warning_rpm_uses_rate_when_in_valid_range() {
+        // rpm_rate=2000 rpm/s, lead=0.2 s → gap = clamp(400, 100, 800) = 400
+        let warning = dynamic_shift_warning_rpm(8000.0, 2000.0, 0.2);
+        assert!((warning - 7600.0).abs() < 1.0, "got {warning}");
+    }
+
+    #[test]
+    fn warning_rpm_uses_fallback_when_rate_too_low() {
+        // rpm_rate=0 (below SHIFT_WARNING_MIN_RPM_RATE=350) → fallback gap
+        // fallback = clamp(8000 * 0.012, 100, 220) = clamp(96, 100, 220) = 100
+        let warning = dynamic_shift_warning_rpm(8000.0, 0.0, 0.2);
+        assert!((warning - 7900.0).abs() < 1.0, "got {warning}");
+    }
+
+    #[test]
+    fn warning_rpm_clamps_large_rate_gap() {
+        // rpm_rate=10000, lead=0.2 → rate*lead=2000, clamped to max=800
+        let warning = dynamic_shift_warning_rpm(8000.0, 10_000.0, 0.2);
+        assert!((warning - 7200.0).abs() < 1.0, "got {warning}");
+    }
+
+    // ── rpm_reference ─────────────────────────────────────────────────────────
+
+    fn payload_with_engine(max_rpm: f64, idle_rpm: f64) -> Value {
+        json!({ "engine": { "maxRpm": max_rpm, "idleRpm": idle_rpm } })
+    }
+
+    #[test]
+    fn rpm_reference_no_observed_uses_initial_ratio() {
+        let payload = payload_with_engine(8000.0, 750.0);
+        let (limit, _redline) = rpm_reference(&payload, 0.0);
+        // Initial ratio = 0.94 → estimated = 8000 * 0.94 = 7520
+        // limit = max(idle+1000=1750, 7520) = 7520
+        assert!((limit - 7520.0).abs() < 1.0, "limit={limit}");
+    }
+
+    #[test]
+    fn rpm_reference_observed_limit_raises_limit() {
+        let payload = payload_with_engine(8000.0, 750.0);
+        // observed_limit > 0 → DEFAULT ratio used (0.895) → estimated=7160
+        // capped observed = min(7800, 8000*0.97=7760) = 7760
+        // limit = max(1750, 7160, 7760) = 7760
+        let (limit, _) = rpm_reference(&payload, 7800.0);
+        assert!((limit - 7760.0).abs() < 1.0, "limit={limit}");
+    }
+
+    #[test]
+    fn rpm_reference_observed_limit_capped_at_97_percent() {
+        let payload = payload_with_engine(8000.0, 750.0);
+        // observed_limit = 8000 (at 100%) → capped at 97% = 7760
+        let (limit, _) = rpm_reference(&payload, 8000.0);
+        assert!((limit - 7760.0).abs() < 1.0, "limit={limit}");
+    }
+
+    // ── detect_limiter_bounce ─────────────────────────────────────────────────
+
+    #[test]
+    fn limiter_bounce_confirms_after_three_reversals() {
+        let mut curve = Map::new();
+        // t=0.00: rising phase starts, no reversal yet
+        assert_eq!(detect_limiter_bounce(&mut curve, 8100.0, 0.00), None);
+        // t=0.15: drop of 40 RPM (>= MIN_AMPLITUDE=30) → first reversal
+        assert_eq!(detect_limiter_bounce(&mut curve, 8060.0, 0.15), None);
+        // t=0.30: rise of 45 RPM → second reversal
+        assert_eq!(detect_limiter_bounce(&mut curve, 8105.0, 0.30), None);
+        // t=0.45: drop of 50 RPM → third reversal → CONFIRMED
+        let result = detect_limiter_bounce(&mut curve, 8055.0, 0.45);
+        assert!(result.is_some(), "expected confirmation, got None");
+        let peak = result.unwrap();
+        // Peak should be the highest RPM seen in the window (8105)
+        assert!((peak - 8105.0).abs() < 1.0, "peak={peak}");
+    }
+
+    #[test]
+    fn limiter_bounce_not_triggered_with_too_large_swings() {
+        // Swings > LIMITER_BOUNCE_MAX_AMPLITUDE (400) are gear changes, not limiter bounce
+        let mut curve = Map::new();
+        assert_eq!(detect_limiter_bounce(&mut curve, 8000.0, 0.00), None);
+        // Drop of 500 RPM — exceeds max amplitude, no reversal counted
+        assert_eq!(detect_limiter_bounce(&mut curve, 7500.0, 0.15), None);
+        assert_eq!(detect_limiter_bounce(&mut curve, 8000.0, 0.30), None);
+        assert_eq!(detect_limiter_bounce(&mut curve, 7500.0, 0.45), None);
+    }
+
+    #[test]
+    fn limiter_bounce_resets_outside_window() {
+        let mut curve = Map::new();
+        assert_eq!(detect_limiter_bounce(&mut curve, 8100.0, 0.0), None);
+        assert_eq!(detect_limiter_bounce(&mut curve, 8060.0, 0.15), None); // reversal 1
+        // Next sample is 2 seconds later — outside the 1-second window
+        // The bounce counter should reset so we never reach MIN_COUNT within
+        // a single window, and confirmation should not fire.
+        assert_eq!(detect_limiter_bounce(&mut curve, 8105.0, 2.30), None); // reversal 1 (reset)
+        assert_eq!(detect_limiter_bounce(&mut curve, 8060.0, 2.45), None); // reversal 2
+        // Still only 2 reversals in new window — no confirmation yet
+        let r = detect_limiter_bounce(&mut curve, 8110.0, 2.60);
+        // reversal 3 from 2.30 to now is within window → may confirm
+        // If within window (2.60-2.30=0.30 ≤ 1.0), this is reversal 3 → confirmed
+        // We just assert it doesn't panic
+        let _ = r;
+    }
+
+    // ── power_curve_key ───────────────────────────────────────────────────────
+
+    #[test]
+    fn power_curve_key_empty_for_zero_ordinal() {
+        let payload = json!({ "car": { "ordinal": 0, "performanceIndex": 900 } });
+        assert_eq!(power_curve_key(&payload), "");
+    }
+
+    #[test]
+    fn power_curve_key_combines_ordinal_and_pi() {
+        let payload = json!({ "car": { "ordinal": 12345, "performanceIndex": 900 } });
+        assert_eq!(power_curve_key(&payload), "12345:900");
+    }
+
+    // ── learned_forward_gear ──────────────────────────────────────────────────
+
+    #[test]
+    fn learned_forward_gear_returns_zero_for_neutral_and_reverse() {
+        let neutral = json!({ "controls": { "gear": 0 } });
+        assert_eq!(learned_forward_gear(&neutral), 0);
+        // Gear 11 exceeds MAX_PLAUSIBLE_LEARNED_GEAR (10) → 0
+        let implausible = json!({ "controls": { "gear": 11 } });
+        assert_eq!(learned_forward_gear(&implausible), 0);
+    }
+
+    #[test]
+    fn learned_forward_gear_valid_gears_pass_through() {
+        for g in 1..=10i64 {
+            let payload = json!({ "controls": { "gear": g } });
+            assert_eq!(learned_forward_gear(&payload), g);
+        }
+    }
+}

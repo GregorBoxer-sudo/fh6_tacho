@@ -4,8 +4,8 @@ let sessions        = [];
 let cars            = [];
 let selectedSession = "";
 let selectedCar     = "";
-let currentCar      = null;   // Fahrzeugobjekt für Tab-Wechsel
-let carPowerPoints  = [];     // vorgeladene Kurvendaten
+let currentCar      = null;   // car object for tab switching
+let carPowerPoints  = [];     // preloaded curve data
 let activeCarChart  = "shifts"; // "shifts" | "power"
 
 function num(value, digits = 0) {
@@ -39,7 +39,7 @@ async function refresh() {
   }
 }
 
-// ── Übersicht ───────────────────────────────────────────────────────────────
+// ── Overview ────────────────────────────────────────────────────────────────
 
 function renderOverview() {
   $("sessionCount").textContent = sessions.length;
@@ -48,12 +48,12 @@ function renderOverview() {
   $("topG").textContent         = `${num(Math.max(0, ...sessions.map((s) => s.maxAbsG  || 0)), 2)}g`;
 }
 
-// ── Session-Liste ───────────────────────────────────────────────────────────
+// ── Session List ────────────────────────────────────────────────────────────
 
 function renderSessions() {
   $("sessionList").innerHTML = sessions.map((s) => `
     <button class="item ${s.id === selectedSession ? "active" : ""}" data-session="${s.id}">
-      <strong>${s.carKey || "Unbekannt"} · ${timeText(s.duration)}</strong>
+      <strong>${s.carKey || "Unknown"} · ${timeText(s.duration)}</strong>
       <small>${new Date((s.startedAt || 0) * 1000).toLocaleString()}</small>
       <em>${num(s.maxSpeed)} km/h · ${num(s.maxRpm)} rpm · ${num(s.maxAbsG, 2)}g · ${s.shiftCount || 0} shifts</em>
     </button>
@@ -63,7 +63,7 @@ function renderSessions() {
   );
 }
 
-// ── Fahrzeug-Liste ──────────────────────────────────────────────────────────
+// ── Car List ────────────────────────────────────────────────────────────────
 
 function renderCars() {
   $("carList").innerHTML = cars.map((car) => {
@@ -74,9 +74,9 @@ function renderCars() {
     return `
       <button class="item ${car.key === selectedCar ? "active" : ""}" data-car="${car.key}">
         <strong>${car.key} · ${car.class || "-"} ${car.pi || ""}</strong>
-        <small>${car.drivetrain || "-"} · ${car.cylinders || 0} Zyl. · ${car.sessions || 0} Sessions</small>
+        <small>${car.drivetrain || "-"} · ${car.cylinders || 0} cyl. · ${car.sessions || 0} sessions</small>
         <em>${num(car.maxSpeed)} km/h · ${num(car.maxPower)} hp · ${num(car.observedRpm)} rpm</em>
-        <em>${shifts || "noch keine Schaltpunkte"}</em>
+        <em>${shifts || "no shift points yet"}</em>
       </button>
     `;
   }).join("");
@@ -85,7 +85,7 @@ function renderCars() {
   );
 }
 
-// ── Auswahl ─────────────────────────────────────────────────────────────────
+// ── Selection ───────────────────────────────────────────────────────────────
 
 async function selectSession(id) {
   selectedSession = id;
@@ -109,16 +109,16 @@ async function selectCar(key) {
   setActiveTab("shifts");
   $("chartTabs").style.display = "";
 
-  // Detail sofort anzeigen, Kurve lädt parallel
+  // Show detail immediately, curve loads in parallel
   if (currentCar) renderCarDetail(currentCar);
 
   const curveData = await loadJson(`/api/analytics/cars/${encodeURIComponent(key)}/powercurve`);
   carPowerPoints  = curveData.points || [];
-  // Wenn der Power-Tab schon aktiv ist, sofort zeichnen
+  // If the power tab is already active, draw immediately
   if (activeCarChart === "power") drawCarPowerCurve(carPowerPoints);
 }
 
-// ── Tab-Steuerung (nur Fahrzeug-Kontext) ────────────────────────────────────
+// ── Tab Control (car context only) ──────────────────────────────────────────
 
 function setActiveTab(chart) {
   activeCarChart = chart;
@@ -135,7 +135,7 @@ document.querySelectorAll(".chartTab").forEach((btn) => {
   });
 });
 
-// ── Session-Detail ──────────────────────────────────────────────────────────
+// ── Session Detail ───────────────────────────────────────────────────────────
 
 function renderDetail(summary, samples) {
   $("detailTitle").textContent = `${summary.carKey || "Session"} · ${timeText(summary.duration)}`;
@@ -153,17 +153,17 @@ function renderDetail(summary, samples) {
     `<div class="stat"><span>${l}</span><strong>${v}</strong></div>`
   ).join("");
   $("lapInfo").innerHTML = `
-    <span>Klasse ${summary.class || "-"}</span>
+    <span>Class ${summary.class || "-"}</span>
     <span>${summary.drivetrain || "-"}</span>
-    <span>${summary.cylinders || 0} Zylinder</span>
-    <span>Ø Gas ${num((summary.avgThrottle || 0) * 100)}%</span>
-    <span>Ø Bremse ${num((summary.avgBrake || 0) * 100)}%</span>
+    <span>${summary.cylinders || 0} cylinders</span>
+    <span>Ø Throttle ${num((summary.avgThrottle || 0) * 100)}%</span>
+    <span>Ø Brake ${num((summary.avgBrake || 0) * 100)}%</span>
     <span>Best Lap ${summary.bestLap ? timeText(summary.bestLap) : "--"}</span>
   `;
   drawSessionChart(samples);
 }
 
-// ── Fahrzeug-Detail ─────────────────────────────────────────────────────────
+// ── Car Detail ───────────────────────────────────────────────────────────────
 
 function renderCarDetail(car) {
   $("detailTitle").textContent = `${car.key} · ${car.class || "-"} ${car.pi ? "PI " + car.pi : ""}`;
@@ -172,9 +172,9 @@ function renderCarDetail(car) {
     ["Max Power", `${num(car.maxPower)} hp`],
     ["Obs. RPM",  `${num(car.observedRpm)} rpm`],
     ["Sessions",  `${car.sessions || 0}`],
-    ["Antrieb",   car.drivetrain || "-"],
-    ["Zylinder",  `${car.cylinders || 0}`],
-    ["Max Gang",  `${car.maxGear || "-"}`],
+    ["Drivetrain", car.drivetrain || "-"],
+    ["Cylinders",  `${car.cylinders || 0}`],
+    ["Max Gear",   `${car.maxGear || "-"}`],
     ["PI",        `${car.pi || "-"}`],
   ];
   $("detailStats").innerHTML = stats.map(([l, v]) =>
@@ -184,16 +184,16 @@ function renderCarDetail(car) {
   const shifts = Object.entries(car.shiftTargets || {}).sort(([a], [b]) => Number(a) - Number(b));
   const drops  = Object.entries(car.dropRatios   || {}).sort(([a], [b]) => Number(a) - Number(b));
   $("lapInfo").innerHTML = [
-    `<span>Klasse ${car.class || "-"}</span>`,
+    `<span>Class ${car.class || "-"}</span>`,
     `<span>${car.drivetrain || "-"}</span>`,
-    ...shifts.map(([g, rpm]) => `<span>Gang ${g} → ${Math.round(rpm)} rpm</span>`),
+    ...shifts.map(([g, rpm]) => `<span>Gear ${g} → ${Math.round(rpm)} rpm</span>`),
     ...drops .map(([g, r])   => `<span>Drop G${g}: ${num(r, 3)}</span>`),
   ].join("");
 
   drawCarChart(car);
 }
 
-// ── Hilfsfunktion Legende ───────────────────────────────────────────────────
+// ── Legend helper ────────────────────────────────────────────────────────────
 
 function legendItem(ctx, x, y, color, label) {
   ctx.fillStyle = color;
@@ -204,7 +204,7 @@ function legendItem(ctx, x, y, color, label) {
   ctx.fillText(label, x + 15, y);
 }
 
-// ── Session-Verlaufsdiagramm ────────────────────────────────────────────────
+// ── Session Progress Chart ───────────────────────────────────────────────────
 
 function drawSessionChart(samples) {
   const canvas = $("sessionChart");
@@ -222,7 +222,7 @@ function drawSessionChart(samples) {
 
   legendItem(ctx,  12, 18, "#55e8ff", "Speed");
   legendItem(ctx,  82, 18, "#f3df4e", "RPM");
-  legendItem(ctx, 142, 18, "#26f06e", "Gas");
+  legendItem(ctx, 142, 18, "#26f06e", "Throttle");
   legendItem(ctx, 197, 18, "#ff3658", "Brake");
 }
 
@@ -238,7 +238,7 @@ function drawSeries(ctx, samples, key, color, w, h, max) {
   ctx.stroke();
 }
 
-// ── Fahrzeug: Schaltpunkt-Balkendiagramm ────────────────────────────────────
+// ── Car: Shift Points Bar Chart ──────────────────────────────────────────────
 
 function drawCarChart(car) {
   const canvas = $("sessionChart");
@@ -255,7 +255,7 @@ function drawCarChart(car) {
 
   if (!shifts.length) {
     ctx.fillStyle = "#6b8a99"; ctx.font = "13px sans-serif"; ctx.textAlign = "center";
-    ctx.fillText("Noch keine Schaltpunkte aufgezeichnet", w / 2, h / 2);
+    ctx.fillText("No shift points recorded yet", w / 2, h / 2);
     ctx.textAlign = "left";
     return;
   }
@@ -292,7 +292,7 @@ function drawCarChart(car) {
   });
 
   ctx.fillStyle = "#9aaeb8"; ctx.font = "11px sans-serif"; ctx.textAlign = "left";
-  ctx.fillText("Optimale Schaltpunkte — RPM pro Gang", pad.left, 20);
+  ctx.fillText("Optimal Shift Points — RPM per Gear", pad.left, 20);
 
   const obsRpm = Number(car.observedRpm);
   if (obsRpm > 0 && obsRpm <= maxRpm) {
@@ -306,9 +306,9 @@ function drawCarChart(car) {
   ctx.textAlign = "left";
 }
 
-// ── Fahrzeug: Leistungs- / Drehmomentkurve ──────────────────────────────────
+// ── Car: Power / Torque Curve ────────────────────────────────────────────────
 
-// Glättet eine Wertereihe mit gleitendem Durchschnitt (Fenster ±radius)
+// Smooths a data series with a moving average (window ±radius)
 function smooth(pts, key, radius = 2) {
   return pts.map((p, i) => {
     const lo  = Math.max(0, i - radius);
@@ -329,12 +329,12 @@ function drawCarPowerCurve(pts) {
   let valid = pts.filter((p) => p.power > 0 || p.torque > 0);
   if (valid.length < 3) {
     ctx.fillStyle = "#6b8a99"; ctx.font = "13px sans-serif"; ctx.textAlign = "center";
-    ctx.fillText("Noch keine Daten – fahre das Auto um die Kurve aufzuzeichnen", w / 2, h / 2);
+    ctx.fillText("No data yet — drive the car to record the power curve", w / 2, h / 2);
     ctx.textAlign = "left";
     return;
   }
 
-  // Kurve glätten (nur wenn genug Punkte)
+  // Smooth the curve (only when enough points available)
   if (valid.length >= 5) {
     valid = smooth(smooth(valid, "power",  2), "torque", 2);
   }
@@ -349,7 +349,7 @@ function drawCarPowerCurve(pts) {
   const cW  = w - pad.left - pad.right;
   const cH  = h - pad.top  - pad.bottom;
 
-  // Gitter + Y-Achsen
+  // Grid + Y axes
   for (let i = 0; i <= 4; i++) {
     const y = pad.top + cH - (i / 4) * cH;
     ctx.strokeStyle = "#1a2529"; ctx.lineWidth = 1;
@@ -361,36 +361,36 @@ function drawCarPowerCurve(pts) {
     ctx.fillText(`${Math.round(maxTorque * i / 4)} Nm`, pad.left + cW + 5, y + 4);
   }
 
-  // X-Achse RPM-Werte
+  // X axis RPM values
   const rpmSteps = Math.min(8, valid.length);
   for (let i = 0; i <= rpmSteps; i++) {
     const x = pad.left + (i / rpmSteps) * cW;
     const r = Math.round((minRpm + rpmRange * i / rpmSteps) / 100) * 100;
     ctx.fillStyle = "#6b8a99"; ctx.font = "10px sans-serif"; ctx.textAlign = "center";
     ctx.fillText(r, x, pad.top + cH + 18);
-    // Kleine Strichmarke
+    // Small tick mark
     ctx.strokeStyle = "#1a2529"; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x, pad.top + cH); ctx.lineTo(x, pad.top + cH + 5); ctx.stroke();
   }
 
-  // Füll-Flächen (halbtransparent) unter den Kurven
+  // Fill areas (semi-transparent) beneath the curves
   fillArea(ctx, valid, pad, cW, cH, minRpm, rpmRange, maxPower,  "power",  "#55e8ff18");
   fillArea(ctx, valid, pad, cW, cH, minRpm, rpmRange, maxTorque, "torque", "#ff9a3418");
 
-  // Kurvenlinien
+  // Curve lines
   drawPowerLine(ctx, valid, pad, cW, cH, minRpm, rpmRange, maxPower,  "power",  "#55e8ff", 2.2);
   drawPowerLine(ctx, valid, pad, cW, cH, minRpm, rpmRange, maxTorque, "torque", "#ff9a34", 2.2);
 
-  // Peak-Markierungen
+  // Peak markers
   const peakP = valid.reduce((a, b) => b.power  > a.power  ? b : a);
   const peakT = valid.reduce((a, b) => b.torque > a.torque ? b : a);
   markPeak(ctx, peakP, "power",  maxPower,  "#55e8ff", pad, cW, cH, minRpm, rpmRange, "hp");
   markPeak(ctx, peakT, "torque", maxTorque, "#ff9a34", pad, cW, cH, minRpm, rpmRange, "Nm");
 
-  // Legende + Achsenbeschriftung
+  // Legend + axis labels
   ctx.textAlign = "left";
-  legendItem(ctx, pad.left,       20, "#55e8ff", "Leistung (hp)");
-  legendItem(ctx, pad.left + 125, 20, "#ff9a34", "Drehmoment (Nm)");
+  legendItem(ctx, pad.left,       20, "#55e8ff", "Power (hp)");
+  legendItem(ctx, pad.left + 125, 20, "#ff9a34", "Torque (Nm)");
   ctx.fillStyle = "#6b8a99"; ctx.font = "10px sans-serif"; ctx.textAlign = "center";
   ctx.fillText("RPM", pad.left + cW / 2, pad.top + cH + 32);
   ctx.textAlign = "left";
@@ -426,12 +426,12 @@ function drawPowerLine(ctx, pts, pad, cW, cH, minRpm, rpmRange, maxVal, key, col
 function markPeak(ctx, pt, key, maxVal, color, pad, cW, cH, minRpm, rpmRange, unit) {
   const x = pad.left + ((pt.rpm - minRpm) / rpmRange) * cW;
   const y = pad.top  + cH - (pt[key] / maxVal) * cH;
-  // Punkt
+  // Dot
   ctx.beginPath();
   ctx.arc(x, y, 4, 0, Math.PI * 2);
   ctx.fillStyle = color;
   ctx.fill();
-  // Label
+  // Label text
   const label = `${Math.round(pt[key])} ${unit} @ ${Math.round(pt.rpm)} rpm`;
   ctx.font      = "bold 10px sans-serif";
   ctx.fillStyle = color;
@@ -440,6 +440,7 @@ function markPeak(ctx, pt, key, maxVal, color, pad, cW, cH, minRpm, rpmRange, un
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
+
 
 $("refreshBtn").addEventListener("click", refresh);
 refresh();
