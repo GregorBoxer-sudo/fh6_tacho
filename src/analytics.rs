@@ -1,0 +1,465 @@
+use anyhow::Result;
+use serde_json::{Map, Value, json};
+use std::{
+    collections::HashMap,
+    fs::{self, File, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
+
+use crate::shift::power_curve_key;
+use crate::util::{get_f64, now_seconds};
+
+const SAMPLE_INTERVAL_SECONDS: f64 = 0.20;
+const SESSION_GAP_SECONDS: f64 = 30.0;
+const MAX_SESSIONS: usize = 50;
+const MAX_CARS: usize = 50;
+
+pub(crate) struct TelemetryRecorder {
+    dir: PathBuf,
+    state: Mutex<RecorderState>,
+}
+
+struct RecorderState {
+    file: Option<File>,
+    session_id: String,
+    session_started_at: f64,
+    last_sample_at: f64,
+    last_seen_at: f64,
+    car_key: String,
+    last_race_on: Option<bool>,
+}
+
+impl TelemetryRecorder {
+    pub(crate) fn new(dir: impl Into<PathBuf>) -> Result<Self> {
+        let dir = dir.into();
+        fs::create_dir_all(&dir)?;
+        Ok(Self {
+            dir,
+            state: Mutex::new(RecorderState {
+                file: None,
+                session_id: String::new(),
+                session_started_at: 0.0,
+                last_sample_at: 0.0,
+                last_seen_at: 0.0,
+                car_key: String::new(),
+                last_race_on: None,
+            }),
+        })
+    }
+
+    pub(crate) fn record(&self, payload: &Value) {
+        let now = get_f64(payload, &["receivedAt"]);
+        let car_key = power_curve_key(payload);
+        if car_key.is_empty() || now <= 0.0 {
+            return;
+        }
+
+        let race_on = payload.get("raceOn").and_then(Value::as_bool).unwrap_or(false);
+
+        let mut state = self.state.lock().unwrap();
+
+        // Race ended — close the current session so subsequent data starts a new one.
+        if state.last_race_on == Some(true) && !race_on {
+            state.file = None;
+        }
+
+        let race_started = state.last_race_on == Some(false) && race_on;
+        state.last_race_on = Some(race_on);
+
+        let needs_new_session = state.file.is_none()
+            || state.car_key != car_key
+            || now - state.last_seen_at > SESSION_GAP_SECONDS
+            || race_started;
+        if needs_new_session {
+            // Trim old sessions if the limit has been exceeded.
+            trim_old_sessions(&self.dir);
+            let session_id = format!("{}-{}", timestamp_id(now), car_key.replace(':', "-"));
+            let path = self.dir.join(format!("{session_id}.jsonl"));
+            match OpenOptions::new().create(true).append(true).open(path) {
+                Ok(file) => {
+                    state.file = Some(file);
+                    state.session_id = session_id;
+                    state.session_started_at = now;
+                    state.last_sample_at = 0.0;
+                    state.car_key = car_key.clone();
+                }
+                Err(_) => return,
+            }
+        }
+        state.last_seen_at = now;
+        if now - state.last_sample_at < SAMPLE_INTERVAL_SECONDS {
+            return;
+        }
+        state.last_sample_at = now;
+        let sample = compact_sample(payload, &state.session_id, state.session_started_at);
+        if let Some(file) = state.file.as_mut()
+            && let Ok(line) = serde_json::to_string(&sample)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
+pub(crate) fn list_sessions(dir: &Path) -> Value {
+    let mut sessions = read_session_summaries(dir);
+    sessions.sort_by(|a, b| {
+        get_f64(b, &["startedAt"])
+            .partial_cmp(&get_f64(a, &["startedAt"]))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    sessions.truncate(MAX_SESSIONS);
+    json!({ "sessions": sessions })
+}
+
+pub(crate) fn session_detail(dir: &Path, id: &str) -> Value {
+    let Some(path) = safe_session_path(dir, id) else {
+        return json!({ "error": "not_found" });
+    };
+    let samples = read_samples(&path);
+    let summary = summarize_samples(id, &samples);
+    let series = downsample_series(&samples, 360);
+    json!({ "summary": summary, "samples": series })
+}
+
+/// Reads power curve buckets straight from power_curves.json —
+/// learned at 60 Hz with 100-RPM bucket resolution.
+pub(crate) fn car_power_curve(power_curves_path: &Path, car_key: &str) -> Value {
+    let curves = fs::read_to_string(power_curves_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+
+    let Some(curve) = curves.get(car_key).and_then(Value::as_object) else {
+        return json!({ "points": [] });
+    };
+    let Some(buckets) = curve.get("buckets").and_then(Value::as_object) else {
+        return json!({ "points": [] });
+    };
+
+    let mut points: Vec<Value> = buckets
+        .iter()
+        .filter_map(|(rpm_str, val)| {
+            let rpm = rpm_str.parse::<f64>().ok()?;
+            let obj = val.as_object()?;
+            let power  = obj.get("power") .and_then(Value::as_f64).unwrap_or(0.0);
+            let torque = obj.get("torque").and_then(Value::as_f64).unwrap_or(0.0);
+            if power <= 0.0 && torque <= 0.0 { return None; }
+            Some(json!({ "rpm": rpm, "power": power, "torque": torque }))
+        })
+        .collect();
+
+    points.sort_by(|a, b| {
+        get_f64(a, &["rpm"])
+            .partial_cmp(&get_f64(b, &["rpm"]))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    json!({ "points": points })
+}
+
+pub(crate) fn car_browser(power_curves_path: &Path, sessions_dir: &Path) -> Value {
+    let curves = fs::read_to_string(power_curves_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let session_stats = car_stats_from_sessions(sessions_dir);
+    let mut cars = Vec::new();
+    for (key, curve_value) in curves {
+        let curve = curve_value.as_object().cloned().unwrap_or_default();
+        let stats = session_stats.get(&key);
+        cars.push(json!({
+            "key": key,
+            "ordinal": key.split(':').next().unwrap_or(""),
+            "pi": key.split(':').nth(1).unwrap_or(""),
+            "class": stats.and_then(|s| s.class_name.clone()).unwrap_or_else(|| "-".to_string()),
+            "drivetrain": stats.and_then(|s| s.drivetrain.clone()).unwrap_or_else(|| "-".to_string()),
+            "cylinders": stats.and_then(|s| s.cylinders).unwrap_or(0),
+            "sessions": stats.map(|s| s.sessions).unwrap_or(0),
+            "maxSpeed": stats.map(|s| s.max_speed).unwrap_or(0.0),
+            "maxPower": stats.map(|s| s.max_power).unwrap_or(0.0),
+            "maxRpm": number_field(&curve, "maxRpmSignature"),
+            "observedRpm": number_field(&curve, "savedMaxObservedRpm"),
+            "maxGear": number_field(&curve, "maxObservedGear"),
+            "shiftTargets": curve.get("optimalShiftRpmByGear").cloned().unwrap_or_else(|| json!({})),
+            "dropRatios": curve.get("gearDropRatios").cloned().unwrap_or_else(|| json!({})),
+            "lastSeenAt": number_field(&curve, "lastSeenAt"),
+        }));
+    }
+    cars.sort_by(|a, b| {
+        get_f64(b, &["lastSeenAt"])
+            .partial_cmp(&get_f64(a, &["lastSeenAt"]))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    cars.truncate(MAX_CARS);
+    json!({ "cars": cars })
+}
+
+fn compact_sample(payload: &Value, session_id: &str, started_at: f64) -> Value {
+    let at = get_f64(payload, &["receivedAt"]);
+    json!({
+        "session": session_id,
+        "at": at,
+        "t": (at - started_at).max(0.0),
+        "car": {
+            "key": power_curve_key(payload),
+            "ordinal": get_f64(payload, &["car", "ordinal"]) as i64,
+            "pi": get_f64(payload, &["car", "performanceIndex"]) as i64,
+            "class": payload.pointer("/car/class").and_then(Value::as_str).unwrap_or("-"),
+            "drivetrain": payload.pointer("/car/drivetrain").and_then(Value::as_str).unwrap_or("-"),
+            "cylinders": get_f64(payload, &["car", "cylinders"]) as i64,
+            "maxObservedGear": get_f64(payload, &["car", "maxObservedGear"]) as i64,
+        },
+        "raceOn": payload.get("raceOn").and_then(Value::as_bool).unwrap_or(false),
+        "speed": get_f64(payload, &["speed", "kmh"]),
+        "rpm": get_f64(payload, &["engine", "rpm"]),
+        "power": get_f64(payload, &["engine", "powerHp"]),
+        "torque": get_f64(payload, &["engine", "torqueNm"]),
+        "boost": get_f64(payload, &["boost"]),
+        "gear": get_f64(payload, &["controls", "gear"]) as i64,
+        "accel": get_f64(payload, &["controls", "accel"]),
+        "brake": get_f64(payload, &["controls", "brake"]),
+        "steer": get_f64(payload, &["controls", "steer"]),
+        "gLat": get_f64(payload, &["motion", "gLat"]),
+        "gLong": get_f64(payload, &["motion", "gLong"]),
+        "drift": get_f64(payload, &["motion", "driftAngleDeg"]),
+        "shiftNow": get_f64(payload, &["engine", "shiftNowRpm"]),
+        "lap": {
+            "number": get_f64(payload, &["lap", "number"]) as i64,
+            "current": get_f64(payload, &["lap", "current"]),
+            "best": get_f64(payload, &["lap", "best"]),
+            "position": get_f64(payload, &["lap", "position"]) as i64,
+        }
+    })
+}
+
+/// Deletes the oldest session files once the total exceeds MAX_SESSIONS.
+fn trim_old_sessions(dir: &Path) {
+    let mut files: Vec<PathBuf> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .map(|e| e.path())
+        .collect();
+    if files.len() < MAX_SESSIONS {
+        return;
+    }
+    // File names start with a timestamp, so lexicographic sort is enough.
+    files.sort();
+    let to_delete = files.len().saturating_sub(MAX_SESSIONS - 1);
+    for path in files.iter().take(to_delete) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn read_session_summaries(dir: &Path) -> Vec<Value> {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .filter_map(|entry| {
+            let id = entry.path().file_stem()?.to_string_lossy().to_string();
+            let samples = read_samples(&entry.path());
+            Some(summarize_samples(&id, &samples))
+        })
+        .collect()
+}
+
+fn read_samples(path: &Path) -> Vec<Value> {
+    let Ok(file) = File::open(path) else {
+        return Vec::new();
+    };
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .collect()
+}
+
+fn summarize_samples(id: &str, samples: &[Value]) -> Value {
+    let mut summary = Summary {
+        id: id.to_string(),
+        ..Default::default()
+    };
+    for sample in samples {
+        summary.ingest(sample);
+    }
+    summary.into_json(samples.len())
+}
+
+#[derive(Default)]
+struct Summary {
+    id: String,
+    started_at: f64,
+    ended_at: f64,
+    car_key: String,
+    class_name: String,
+    drivetrain: String,
+    cylinders: i64,
+    max_speed: f64,
+    max_rpm: f64,
+    max_power: f64,
+    max_torque: f64,
+    max_boost: f64,
+    max_abs_g: f64,
+    max_drift: f64,
+    throttle_sum: f64,
+    brake_sum: f64,
+    moving_samples: usize,
+    shift_count: usize,
+    last_gear: i64,
+    best_lap: f64,
+}
+
+impl Summary {
+    fn ingest(&mut self, sample: &Value) {
+        let at = get_f64(sample, &["at"]);
+        if self.started_at == 0.0 {
+            self.started_at = at;
+            self.car_key = sample
+                .pointer("/car/key")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            self.class_name = sample
+                .pointer("/car/class")
+                .and_then(Value::as_str)
+                .unwrap_or("-")
+                .to_string();
+            self.drivetrain = sample
+                .pointer("/car/drivetrain")
+                .and_then(Value::as_str)
+                .unwrap_or("-")
+                .to_string();
+            self.cylinders = get_f64(sample, &["car", "cylinders"]) as i64;
+        }
+        self.ended_at = at;
+        self.max_speed = self.max_speed.max(get_f64(sample, &["speed"]));
+        self.max_rpm = self.max_rpm.max(get_f64(sample, &["rpm"]));
+        self.max_power = self.max_power.max(get_f64(sample, &["power"]));
+        self.max_torque = self.max_torque.max(get_f64(sample, &["torque"]));
+        self.max_boost = self.max_boost.max(get_f64(sample, &["boost"]));
+        self.max_abs_g = self.max_abs_g.max(
+            get_f64(sample, &["gLat"])
+                .abs()
+                .max(get_f64(sample, &["gLong"]).abs()),
+        );
+        self.max_drift = self.max_drift.max(get_f64(sample, &["drift"]).abs());
+        if get_f64(sample, &["speed"]) > 5.0 {
+            self.throttle_sum += get_f64(sample, &["accel"]);
+            self.brake_sum += get_f64(sample, &["brake"]);
+            self.moving_samples += 1;
+        }
+        let gear = get_f64(sample, &["gear"]) as i64;
+        if self.last_gear > 0 && gear > self.last_gear {
+            self.shift_count += 1;
+        }
+        if gear > 0 {
+            self.last_gear = gear;
+        }
+        let best_lap = get_f64(sample, &["lap", "best"]);
+        if best_lap > 0.0 && (self.best_lap == 0.0 || best_lap < self.best_lap) {
+            self.best_lap = best_lap;
+        }
+    }
+
+    fn into_json(self, samples: usize) -> Value {
+        let moving = self.moving_samples.max(1) as f64;
+        json!({
+            "id": self.id,
+            "startedAt": self.started_at,
+            "endedAt": self.ended_at,
+            "duration": (self.ended_at - self.started_at).max(0.0),
+            "samples": samples,
+            "carKey": self.car_key,
+            "class": self.class_name,
+            "drivetrain": self.drivetrain,
+            "cylinders": self.cylinders,
+            "maxSpeed": self.max_speed,
+            "maxRpm": self.max_rpm,
+            "maxPower": self.max_power,
+            "maxTorque": self.max_torque,
+            "maxBoost": self.max_boost,
+            "maxAbsG": self.max_abs_g,
+            "maxDrift": self.max_drift,
+            "avgThrottle": self.throttle_sum / moving,
+            "avgBrake": self.brake_sum / moving,
+            "shiftCount": self.shift_count,
+            "bestLap": self.best_lap,
+        })
+    }
+}
+
+fn downsample_series(samples: &[Value], max_points: usize) -> Vec<Value> {
+    if samples.len() <= max_points {
+        return samples.to_vec();
+    }
+    let step = samples.len() as f64 / max_points as f64;
+    let mut out = Vec::with_capacity(max_points);
+    let mut index = 0.0;
+    while (index as usize) < samples.len() && out.len() < max_points {
+        out.push(samples[index as usize].clone());
+        index += step;
+    }
+    out
+}
+
+#[derive(Default)]
+struct CarStats {
+    sessions: usize,
+    class_name: Option<String>,
+    drivetrain: Option<String>,
+    cylinders: Option<i64>,
+    max_speed: f64,
+    max_power: f64,
+}
+
+fn car_stats_from_sessions(dir: &Path) -> HashMap<String, CarStats> {
+    let mut stats = HashMap::new();
+    for summary in read_session_summaries(dir) {
+        let key = summary
+            .get("carKey")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if key.is_empty() {
+            continue;
+        }
+        let entry = stats.entry(key).or_insert_with(CarStats::default);
+        entry.sessions += 1;
+        entry.class_name = summary
+            .get("class")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        entry.drivetrain = summary
+            .get("drivetrain")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        entry.cylinders = Some(get_f64(&summary, &["cylinders"]) as i64);
+        entry.max_speed = entry.max_speed.max(get_f64(&summary, &["maxSpeed"]));
+        entry.max_power = entry.max_power.max(get_f64(&summary, &["maxPower"]));
+    }
+    stats
+}
+
+fn safe_session_path(dir: &Path, id: &str) -> Option<PathBuf> {
+    if id.contains('/') || id.contains('\\') || id.contains("..") {
+        return None;
+    }
+    let path = dir.join(format!("{id}.jsonl"));
+    path.exists().then_some(path)
+}
+
+fn number_field(map: &Map<String, Value>, key: &str) -> f64 {
+    map.get(key)
+        .and_then(|v| v.as_f64().or_else(|| v.as_i64().map(|n| n as f64)))
+        .unwrap_or(0.0)
+}
+
+fn timestamp_id(at: f64) -> String {
+    format!("{}", at.max(now_seconds()) as u64)
+}

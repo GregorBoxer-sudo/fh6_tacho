@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#05070b">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Forza Tacho">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Forza Tacho</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="/icon.svg">
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <main class="stage">
+      <section class="statusline">
+        <div class="status" id="statusDot"></div>
+        <span id="connection">warte auf daten</span>
+        <span id="latency">-- ms</span>
+        <a class="topLink" href="/analytics.html">Analyse</a>
+      </section>
+
+      <section class="display">
+        <div class="slipLeds slipFL" data-wheel="FL" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="slipLeds slipRL" data-wheel="RL" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="slipLeds slipFR" data-wheel="FR" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="slipLeds slipRR" data-wheel="RR" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+
+        <section class="shift" aria-hidden="true">
+          <span class="led"></span><span class="led"></span><span class="led"></span><span class="led"></span>
+          <span class="led"></span><span class="led"></span><span class="led"></span><span class="led"></span>
+          <span class="led"></span><span class="led"></span><span class="led"></span><span class="led"></span>
+          <span class="led"></span><span class="led"></span>
+        </section>
+        <section class="warnings warningsLeft">
+          <span id="understeerWarn">US</span>
+          <span id="oversteerWarn">OS</span>
+          <span id="overlapWarn">B/T</span>
+          <span id="tempWarn">TMP</span>
+        </section>
+        <section class="warnings warningsRight">
+          <span id="absWarn">ABS</span>
+          <span id="brakeLockWarn">LOCK</span>
+          <span id="clutchWarn">CL</span>
+          <span id="handbrakeWarn">HB</span>
+        </section>
+
+        <section class="screen">
+          <section class="engine">
+            <div><span>RPM</span><strong id="rpmValue">0</strong></div>
+            <div><span>Power</span><strong id="power">0 hp</strong></div>
+            <div><span>Torque</span><strong id="torque">0 Nm</strong></div>
+            <div><span>Boost</span><strong id="boost">0.00</strong></div>
+            <div class="raceData"><span>Lap</span><strong id="lapNumber">--</strong></div>
+            <div class="raceData"><span>Pos</span><strong id="position">--</strong></div>
+            <div class="timing raceData"><span>Time</span><strong id="lapTime">--:--.---</strong></div>
+            <div class="timing raceData"><span>Best</span><strong id="bestLap">--:--.---</strong></div>
+          </section>
+
+          <section class="center">
+            <div class="drift">
+              <span>DRIFT</span>
+              <em class="driftTrack"><b id="driftMarker"></b></em>
+              <small id="driftPeak">0p</small>
+              <strong id="driftAngle">0 deg</strong>
+            </div>
+            <div class="speed"><span id="speed">0</span><small>km/h</small></div>
+            <div class="gear" id="gear">0</div>
+            <div class="rpmText"><span id="rpm">0</span><span id="rpmMax">/ 0 rpm</span></div>
+            <div class="rpmTrack" aria-hidden="true"><div class="rpmFill" id="rpmFill"></div></div>
+          </section>
+
+          <section class="rightStack">
+            <div class="controlStrip">
+              <div class="mini"><span>GAS</span><strong id="accel">0%</strong><em><b id="accelBar"></b></em></div>
+              <div class="mini"><span>BRK</span><strong id="brake">0%</strong><em class="brake"><b id="brakeBar"></b></em></div>
+              <div class="mini"><span>STR</span><strong id="steer">0.00</strong><em class="steerTrack"><b id="steerMarker"></b></em></div>
+              <div class="mini compact raceData"><span>DLT</span><strong id="lapDelta">--</strong></div>
+              <div class="mini compact raceData"><span>PROG</span><strong id="lapProgress">--%</strong><em><b id="progressBar"></b></em></div>
+            </div>
+            <div class="gMeter">
+              <div class="gTitle">G-FORCE</div>
+              <strong class="gPeak" id="gPeak">0.00p</strong>
+              <div class="gPad" aria-hidden="true"><i id="gDot"></i></div>
+              <strong id="gForce">0.00g</strong>
+            </div>
+            <div class="dataStrip">
+              <span>LAT <b id="gLat">0.00</b></span>
+              <span>LON <b id="gLong">0.00</b></span>
+              <span>DRV <b id="drivetrain">---</b></span>
+              <span>FUEL <b id="fuel">--%</b></span>
+            </div>
+          </section>
+
+          <section class="tires">
+            <div class="tire" id="tireFL"><span>FL</span><strong>--</strong></div>
+            <div class="tire" id="tireRL"><span>RL</span><strong>--</strong></div>
+            <div class="tire" id="tireRR"><span>RR</span><strong>--</strong></div>
+            <div class="tire" id="tireFR"><span>FR</span><strong>--</strong></div>
+          </section>
+        </section>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
