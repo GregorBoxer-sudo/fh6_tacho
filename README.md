@@ -511,6 +511,26 @@ Car identity is keyed on `ordinal:performanceIndex` — same car at different PI
 
 Releases are published on GitHub Releases. See [CHANGELOG.md](CHANGELOG.md) for what changed.
 
+<details>
+<summary>Open release security details</summary>
+
+Release binaries are gated on:
+
+- `cargo test`
+- frontend syntax checks (`node --check`)
+- SHA-256 checksum generation (`SHA256SUMS.txt`) for all uploaded binaries
+
+The workflow also runs `cargo audit` and emits a GitHub warning if dependency advisories are found or the audit tool cannot be installed. The audit is intentionally non-blocking for packaging because upstream RustSec advisories can affect transitive GUI dependencies without an immediate available fix; check the workflow log before publishing security-sensitive releases.
+
+Windows binaries are Authenticode-signed when these repository secrets are configured:
+
+- `WINDOWS_CERT_PFX_BASE64` — base64-encoded `.pfx` certificate
+- `WINDOWS_CERT_PASSWORD` — certificate password
+
+Without those secrets, the workflow publishes unsigned binaries plus checksums.
+
+</details>
+
 ---
 
 ## AI

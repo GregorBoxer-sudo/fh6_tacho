@@ -204,6 +204,7 @@ fn paint_leds(painter: &egui::Painter, rect: egui::Rect, state: &LedState) {
 
 // ── Overlay viewport UI ───────────────────────────────────────────────────────
 
+#[allow(deprecated)]
 fn overlay_ui(ctx: &egui::Context, state: &LedState, close_signal: &Arc<AtomicBool>) {
     // Repaint fast during racing so the LEDs track 60 Hz telemetry.
     ctx.request_repaint_after(if state.race_on {
@@ -218,14 +219,14 @@ fn overlay_ui(ctx: &egui::Context, state: &LedState, close_signal: &Arc<AtomicBo
 
     // Transparent panel — the OS window itself is transparent via ViewportBuilder.
     egui::CentralPanel::default()
-        .frame(egui::Frame::none())
+        .frame(egui::Frame::NONE)
         .show(ctx, |ui| {
             let rect = ui.max_rect();
 
             // Dark pill background
             ui.painter().rect_filled(
                 rect,
-                egui::Rounding::same(8.0),
+                egui::CornerRadius::same(8),
                 Color32::from_rgba_unmultiplied(10, 10, 14, 215),
             );
 
@@ -246,7 +247,7 @@ fn overlay_ui(ctx: &egui::Context, state: &LedState, close_signal: &Arc<AtomicBo
                 ui.separator();
                 if ui.button("x  Close overlay").clicked() {
                     close_signal.store(true, Ordering::Relaxed);
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -634,7 +635,8 @@ impl ForzaTachoApp {
 }
 
 impl eframe::App for ForzaTachoApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         // Handle close request sent from inside the overlay's context menu.
         if self.overlay_close.load(Ordering::Relaxed) {
             self.show_overlay = false;
@@ -670,7 +672,9 @@ impl eframe::App for ForzaTachoApp {
         // Repaint rate: fast when live and any feature needs it.
         let needs_fast = is_live && {
             self.show_overlay
-                || self.settings.lock()
+                || self
+                    .settings
+                    .lock()
                     .map(|s| s.shift_sound_backend != "none")
                     .unwrap_or(false)
         };
@@ -700,7 +704,7 @@ impl eframe::App for ForzaTachoApp {
         let has_lan_ip = local_only_active || lan_addresses.iter().any(|ip| !ip.is_loopback());
 
         // ── Main window ───────────────────────────────────────────────────────
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             ScrollArea::vertical().show(ui, |ui| {
                 ui.set_min_width(360.0);
 
@@ -772,7 +776,7 @@ impl eframe::App for ForzaTachoApp {
                                 .on_hover_text("Copy to clipboard")
                                 .clicked()
                             {
-                                ui.output_mut(|o| o.copied_text = primary_ip.clone());
+                                ui.ctx().copy_text(primary_ip.clone());
                             }
                         });
                         ui.end_row();
@@ -1033,7 +1037,7 @@ impl eframe::App for ForzaTachoApp {
                     .with_inner_size([320.0, 48.0])
                     .with_min_inner_size([120.0, 24.0]),
                 move |ctx, class| {
-                    if class == egui::ViewportClass::Embedded {
+                    if class == egui::ViewportClass::EmbeddedWindow {
                         // Platform doesn't support separate windows — skip silently.
                         return;
                     }
