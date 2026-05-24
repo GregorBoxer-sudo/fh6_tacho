@@ -99,4 +99,7 @@ pub(crate) struct Args {
     /// Enabled automatically when no display is detected on Linux.
     #[arg(long)]
     pub(crate) no_gui: bool,
+    /// Enable debug-only tools in the web UI (e.g. map calibration mode).
+    #[arg(long)]
+    pub(crate) debug: bool,
 }

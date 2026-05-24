@@ -1,10 +1,11 @@
-const CACHE_NAME = "forza-tacho-v86";
+const CACHE_NAME = "forza-tacho-v91";
 const ASSETS = [
   "/",
   "/index.html",
   "/analytics.html",
   "/analytics.css",
   "/analytics.js",
+  "/map.jpg",
   "/style.css",
   "/app.js",
   "/manifest.webmanifest",

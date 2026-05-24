@@ -218,7 +218,7 @@ fn overlay_ui(
             resp.context_menu(|ui| {
                 ui.label(RichText::new("Shift-LED Overlay").strong().small());
                 ui.separator();
-                if ui.button("✕  Overlay schließen").clicked() {
+                if ui.button("x  Close overlay").clicked() {
                     close_signal.store(true, Ordering::Relaxed);
                     ui.close_menu();
                 }
@@ -226,6 +226,230 @@ fn overlay_ui(
 
             // Draw LEDs on top
             paint_leds(ui.painter(), rect, state);
+        });
+}
+
+// ── Help / legend content ─────────────────────────────────────────────────────
+
+fn help_ui(ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+
+    // ── Main displays ─────────────────────────────────────────────────────
+    ui.label(RichText::new("Main displays").strong().small());
+    ui.add_space(3.0);
+
+    egui::Grid::new("help_main")
+        .num_columns(2)
+        .spacing([14.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            let row = |ui: &mut egui::Ui, field: &str, desc: &str| {
+                ui.label(RichText::new(field).small().strong().monospace());
+                ui.label(RichText::new(desc).small().weak());
+                ui.end_row();
+            };
+            row(ui, "RPM",         "Engine revolutions per minute.");
+            row(ui, "Speed",       "Vehicle speed in km/h.");
+            row(ui, "Gear",        "Current gear. 0 = neutral, negative = reverse.");
+            row(ui, "Power",       "Estimated wheel power at the current RPM (hp).");
+            row(ui, "Torque",      "Engine torque at the current RPM (Nm).");
+            row(ui, "Boost",       "Turbo / supercharger boost pressure.");
+            row(ui, "Lap / Best",  "Lap number, current lap time, and fastest lap this session.");
+            row(ui, "Pos",         "Race position — only in structured events.");
+        });
+
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(6.0);
+
+    // ── Control strip ─────────────────────────────────────────────────────
+    ui.label(RichText::new("Control strip (right side)").strong().small());
+    ui.add_space(3.0);
+
+    egui::Grid::new("help_controls")
+        .num_columns(2)
+        .spacing([14.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            let row = |ui: &mut egui::Ui, label: &str, full: &str, desc: &str| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(label).small().strong().monospace());
+                    ui.label(RichText::new(full).small().weak());
+                });
+                ui.label(RichText::new(desc).small().weak());
+                ui.end_row();
+            };
+            row(ui, "GAS",  "(Throttle)",    "Accelerator pedal, 0–100 %.");
+            row(ui, "BRK",  "(Brake)",       "Brake pedal, 0–100 %.");
+            row(ui, "STR",  "(Steering)",    "Wheel position: -1.0 = full left, +1.0 = full right.");
+            row(ui, "DLT",  "(Lap delta)",   "Time gap to your best lap. Green = faster, red = slower.");
+            row(ui, "PROG", "(Lap progress)","How far through the current lap, as a percentage.");
+        });
+
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(6.0);
+
+    // ── Data strip ────────────────────────────────────────────────────────
+    ui.label(RichText::new("Data strip").strong().small());
+    ui.add_space(3.0);
+
+    egui::Grid::new("help_data")
+        .num_columns(2)
+        .spacing([14.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            let row = |ui: &mut egui::Ui, label: &str, full: &str, desc: &str| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(label).small().strong().monospace());
+                    ui.label(RichText::new(full).small().weak());
+                });
+                ui.label(RichText::new(desc).small().weak());
+                ui.end_row();
+            };
+            row(ui, "LAT",  "(Lateral G)",      "Left/right cornering load in G.");
+            row(ui, "LON",  "(Longitudinal G)",  "Acceleration / braking load in G.");
+            row(ui, "DRV",  "(Drivetrain)",      "FWD, RWD, or AWD.");
+            row(ui, "FUEL", "(Fuel level)",      "Percentage (<=100 %) or litres when > 1.2.");
+        });
+
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(6.0);
+
+    // ── G-force meter & drift ─────────────────────────────────────────────
+    ui.label(RichText::new("G-force meter and drift display").strong().small());
+    ui.add_space(3.0);
+
+    let notes: &[(&str, &str)] = &[
+        ("G-meter dot",
+         "Moves in two dimensions: left/right = lateral load, up/down = longitudinal load."),
+        ("Np suffix (e.g. 1.23p)",
+         "Peak value recorded since you started driving this session."),
+        ("Drift angle",
+         "Estimated side-slip angle in degrees. The sliding bar visualises the live angle."),
+        ("Drift Np",
+         "Peak drift angle seen this session."),
+    ];
+    for (title, body) in notes {
+        ui.label(RichText::new(*title).small().strong());
+        ui.label(RichText::new(*body).small().weak());
+        ui.add_space(2.0);
+    }
+
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(6.0);
+
+    // ── Tyre corners ──────────────────────────────────────────────────────
+    ui.label(RichText::new("Tyre corners  FL / FR / RL / RR").strong().small());
+    ui.add_space(3.0);
+    ui.label(RichText::new(
+        "FL = Front Left, FR = Front Right, RL = Rear Left, RR = Rear Right.\n\
+         Temperature box — tyre surface °C. Colour: blue (cold) → green (optimal) → red/white (overheating).\n\
+         Slip LED strip (5 dots, shown at screen corners) — how hard that tyre is working. \
+         All 5 lit = significant wheelspin or lockup."
+    ).small().weak());
+
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(6.0);
+
+    // ── Warning indicators ────────────────────────────────────────────────
+    ui.label(RichText::new("Warning indicators").strong().small());
+    ui.add_space(3.0);
+
+    egui::Grid::new("help_warnings")
+        .num_columns(2)
+        .spacing([14.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            let row = |ui: &mut egui::Ui, label: &str, full: &str, desc: &str| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(label).small().strong().monospace());
+                    ui.label(RichText::new(full).small().weak());
+                });
+                ui.label(RichText::new(desc).small().weak());
+                ui.end_row();
+            };
+            row(ui, "US",   "(Understeer)",    "Front tyres losing grip more than rears while steering — car pushes wide.");
+            row(ui, "OS",   "(Oversteer)",     "Rear tyres losing grip more than fronts while steering — rear steps out.");
+            row(ui, "B/T",  "(Brake/Throttle)","Both brake and throttle pressed at the same time (both > 8 %).");
+            row(ui, "TMP",  "(Temperature)",   "At least one tyre has exceeded 105 °C (grip noticeably degrades above this).");
+            row(ui, "ABS",  "(ABS active)",    "Anti-lock braking system is intervening under hard braking.");
+            row(ui, "LOCK", "(Wheel lock)",    "A front wheel has locked up under hard braking.");
+            row(ui, "CL",   "(Clutch)",        "Clutch pedal is pressed (> 8 %).");
+            row(ui, "HB",   "(Handbrake)",     "Handbrake is on (> 8 %).");
+        });
+
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(6.0);
+
+    // ── Shift indicator stages ────────────────────────────────────────────
+    ui.label(RichText::new("Shift indicator — learning stages").strong().small());
+    ui.add_space(3.0);
+
+    let stages: &[(&str, &str)] = &[
+        ("Stage 1 — No data yet",
+         "Uses a conservative estimate: shifts at ~94 % of Forza's reported max RPM, \
+          leaning early to avoid hitting the limiter."),
+        ("Stage 2 — Rev limit observed",
+         "After a few laps the app locks in the actual RPM ceiling it has seen and \
+          tightens the warning accordingly."),
+        ("Stage 3 — Limiter bounce detected",
+         "If you hold full throttle at the limiter the characteristic RPM oscillation \
+          is detected and the exact limit is confirmed."),
+        ("Stage 4-5 — Power curve + gear ratios",
+         "Full-throttle runs build a per-car power curve (100 RPM buckets). \
+          Gear drop ratios are measured from your actual upshifts."),
+        ("Stage 6 — Optimal shift point",
+         "The app finds the RPM where power after an upshift exceeds current power \
+          (>0.5 % threshold). That becomes the shift target."),
+        ("Stage 7 — Dynamic warning",
+         "The light fires early: warning_rpm = shift_rpm - clamp(rpm_rate x 0.20s, 100, 800). \
+          Lead time scales with how fast RPM is climbing in the current gear."),
+    ];
+
+    for (title, body) in stages {
+        ui.label(RichText::new(*title).small().strong());
+        ui.label(RichText::new(*body).small().weak());
+        ui.add_space(3.0);
+    }
+
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(4.0);
+
+    // ── Shift LED colours ─────────────────────────────────────────────────
+    ui.label(RichText::new("Shift LED colours").strong().small());
+    ui.add_space(3.0);
+
+    egui::Grid::new("help_leds")
+        .num_columns(2)
+        .spacing([14.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            let swatch = |ui: &mut egui::Ui, color: Color32, label: &str, desc: &str| {
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(12.0, 12.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().circle_filled(rect.center(), 6.0, color);
+                    ui.label(RichText::new(label).small().strong());
+                });
+                ui.label(RichText::new(desc).small().weak());
+                ui.end_row();
+            };
+            swatch(ui, Color32::from_rgb(0x26, 0xf0, 0x6e), "Green  (1–4)",
+                "RPM building — shift point not yet near.");
+            swatch(ui, Color32::from_rgb(0xf3, 0xdf, 0x4e), "Yellow (5–8)",
+                "Approaching the shift point.");
+            swatch(ui, Color32::from_rgb(0xff, 0x36, 0x58), "Red    (9–11)",
+                "Getting close — prepare to shift.");
+            swatch(ui, Color32::from_rgb(0xd8, 0x46, 0xff), "Purple (12–14) + flash",
+                "Shift NOW. All LEDs flash rapidly until you upshift.");
         });
 }
 
@@ -318,18 +542,18 @@ impl eframe::App for ForzaTachoApp {
                 // ── Status ─────────────────────────────────────────────────
                 ui.horizontal(|ui| {
                     let (dot, label) = if demo_mode {
-                        (Color32::from_rgb(255, 190, 20), "Demo-Modus läuft")
+                        (Color32::from_rgb(255, 190, 20), "Demo mode running")
                     } else if is_live {
-                        (Color32::from_rgb(60, 200, 60), "Empfange Telemetrie (60 Hz)")
+                        (Color32::from_rgb(60, 200, 60), "Receiving telemetry (60 Hz)")
                     } else {
-                        (Color32::from_rgb(220, 55, 55), "Warte auf Forza-Pakete…")
+                        (Color32::from_rgb(220, 55, 55), "Waiting for Forza packets...")
                     };
                     ui.label(RichText::new("●").color(dot).size(16.0));
                     ui.label(label);
                 });
                 if packets > 0 {
                     ui.label(
-                        RichText::new(format!("   {} Pakete empfangen", packets))
+                        RichText::new(format!("   {} packets received", packets))
                             .small().weak(),
                     );
                 }
@@ -338,11 +562,11 @@ impl eframe::App for ForzaTachoApp {
                 ui.separator();
                 ui.add_space(8.0);
 
-                // ── 1 · Forza einrichten ───────────────────────────────────
-                ui.label(RichText::new("1.  Forza einrichten").strong());
+                // ── 1 · Set up Forza ───────────────────────────────────────
+                ui.label(RichText::new("1.  Set up Forza").strong());
                 ui.add_space(3.0);
                 ui.label(
-                    RichText::new("Einstellungen → HUD und Gameplay → Data Out:")
+                    RichText::new("Settings → HUD and Gameplay → Data Out:")
                         .small().weak(),
                 );
                 ui.add_space(6.0);
@@ -354,17 +578,17 @@ impl eframe::App for ForzaTachoApp {
                     .show(ui, |ui| {
                         ui.label("Data Out");
                         ui.label(
-                            RichText::new("EIN")
+                            RichText::new("ON")
                                 .color(Color32::from_rgb(60, 200, 60))
                                 .strong(),
                         );
                         ui.end_row();
 
-                        ui.label("IP-Adresse");
+                        ui.label("IP Address");
                         ui.horizontal(|ui| {
                             ui.code(&primary_ip);
                             if ui.add(egui::Button::new("copy").small())
-                                .on_hover_text("In Zwischenablage kopieren")
+                                .on_hover_text("Copy to clipboard")
                                 .clicked()
                             {
                                 ui.output_mut(|o| o.copied_text = primary_ip.clone());
@@ -381,7 +605,7 @@ impl eframe::App for ForzaTachoApp {
                     ui.add_space(5.0);
                     ui.label(
                         RichText::new(
-                            "⚠  Keine LAN-IP — Forza und App müssen auf demselben PC laufen.",
+                            "⚠  No LAN IP detected — Forza and this app must run on the same PC.",
                         )
                         .color(Color32::from_rgb(255, 190, 20))
                         .small(),
@@ -392,15 +616,15 @@ impl eframe::App for ForzaTachoApp {
                 ui.separator();
                 ui.add_space(8.0);
 
-                // ── 2 · Dashboard öffnen ───────────────────────────────────
-                ui.label(RichText::new("2.  Dashboard öffnen").strong());
+                // ── 2 · Open Dashboard ─────────────────────────────────────
+                ui.label(RichText::new("2.  Open Dashboard").strong());
                 ui.add_space(6.0);
 
                 for (i, addr) in sorted_addrs.iter().enumerate() {
                     let url = format!("http://{}:{}", addr, http_port);
                     ui.horizontal(|ui| {
                         ui.code(&url);
-                        let lbl = if i == 0 { "Im Browser öffnen" } else { "öffnen" };
+                        let lbl = if i == 0 { "Open in browser" } else { "open" };
                         if ui.button(lbl).on_hover_text(&url).clicked() {
                             let u = url.clone();
                             std::thread::spawn(move || { let _ = open::that(u); });
@@ -416,16 +640,16 @@ impl eframe::App for ForzaTachoApp {
                 ui.label(RichText::new("3.  Shift-LED Overlay").strong());
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.toggle_value(&mut self.show_overlay, "Overlay anzeigen");
+                    ui.toggle_value(&mut self.show_overlay, "Show overlay");
                     ui.label(
-                        RichText::new("immer im Vordergrund · verschiebbar · skalierbar")
+                        RichText::new("always on top · draggable · resizable")
                             .small().weak(),
                     );
                 });
                 if self.show_overlay {
                     ui.label(
                         RichText::new(
-                            "   Overlay läuft — Rechtsklick auf das Overlay zum Schließen.",
+                            "   Overlay running — right-click the overlay to close it.",
                         )
                         .small()
                         .color(Color32::from_rgb(60, 200, 60)),
@@ -436,8 +660,19 @@ impl eframe::App for ForzaTachoApp {
                 ui.separator();
                 ui.add_space(4.0);
 
-                // ── Einstellungen (aufklappbar) ────────────────────────────
-                egui::CollapsingHeader::new("⚙  Einstellungen")
+                // ── Help / Legend ──────────────────────────────────────────
+                egui::CollapsingHeader::new("?  Help & field legend")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        help_ui(ui);
+                    });
+
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // ── Settings (collapsible) ─────────────────────────────────
+                egui::CollapsingHeader::new("Settings")
                     .default_open(false)
                     .show(ui, |ui| {
                         ui.add_space(4.0);
@@ -445,41 +680,41 @@ impl eframe::App for ForzaTachoApp {
                             .num_columns(2)
                             .spacing([20.0, 5.0])
                             .show(ui, |ui| {
-                                ui.label("HTTP-Port (Dashboard)");
+                                ui.label("HTTP port (dashboard)");
                                 ui.code(http_port.to_string());
                                 ui.end_row();
-                                ui.label("UDP-Port (Forza Data Out)");
+                                ui.label("UDP port (Forza Data Out)");
                                 ui.code(udp_port.to_string());
                                 ui.end_row();
                             });
                         ui.add_space(4.0);
                         ui.label(
                             RichText::new(
-                                "Ports beim Start über --http-port / --udp-port ändern.",
+                                "Change ports at startup with --http-port / --udp-port.",
                             )
                             .small().weak(),
                         );
                         if demo_mode {
                             ui.add_space(4.0);
                             ui.label(
-                                RichText::new("Demo-Modus aktiv (--demo)")
+                                RichText::new("Demo mode active (--demo)")
                                     .color(Color32::from_rgb(255, 190, 20)).small(),
                             );
                         }
 
-                        // ── KDE Wayland Hinweis ────────────────────────────
+                        // ── KDE Wayland tip ────────────────────────────────
                         ui.add_space(10.0);
                         ui.separator();
                         ui.add_space(6.0);
                         ui.label(
-                            RichText::new("KDE Wayland – Overlay immer im Vordergrund")
+                            RichText::new("KDE Wayland — keep overlay always on top")
                                 .strong().small(),
                         );
                         ui.add_space(3.0);
                         ui.label(
                             RichText::new(
-                                "Auf KDE Wayland ignoriert der Compositor das App-seitige \
-                                'Always on top'-Flag. Loesung via Fensterregeln:",
+                                "On KDE Wayland the compositor ignores the app-level \
+                                always-on-top flag. Fix it with a window rule:",
                             )
                             .small().weak(),
                         );
@@ -493,11 +728,11 @@ impl eframe::App for ForzaTachoApp {
                                     ui.label(RichText::new(text).small());
                                     ui.end_row();
                                 };
-                                step(ui, "1.", "Systemeinstellungen > Fenster-Verwaltung > Fensterregeln");
-                                step(ui, "2.", "+ Neu > Fensterklasse: forza-tacho");
-                                step(ui, "3.", "Anordnung: Erzwingen, Immer im Vordergrund");
-                                step(ui, "4.", "Arbeitsflaeeche: Erzwingen, Alle Arbeitsflaechen");
-                                step(ui, "5.", "Uebernehmen — gilt sofort, kein Neustart noetig");
+                                step(ui, "1.", "System Settings > Window Management > Window Rules");
+                                step(ui, "2.", "+ Add New — Window class: forza-tacho");
+                                step(ui, "3.", "Keep above: Force, Yes");
+                                step(ui, "4.", "Virtual Desktop: Force, All Desktops");
+                                step(ui, "5.", "Apply — takes effect immediately, no restart needed");
                             });
                     });
 
@@ -555,5 +790,5 @@ pub(crate) fn run(hub: Arc<TelemetryHub>, args: &Args) -> anyhow::Result<()> {
         options,
         Box::new(move |_cc| Ok(Box::new(ForzaTachoApp::new(hub, &args)))),
     )
-    .map_err(|e| anyhow::anyhow!("GUI-Fehler: {e}"))
+    .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
 }

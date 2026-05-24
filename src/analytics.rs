@@ -3,7 +3,7 @@ use serde_json::{Map, Value, json};
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -11,7 +11,7 @@ use std::{
 use crate::shift::power_curve_key;
 use crate::util::{get_f64, now_seconds};
 
-const SAMPLE_INTERVAL_SECONDS: f64 = 0.20;
+const SAMPLE_INTERVAL_SECONDS: f64 = 0.05;
 const SESSION_GAP_SECONDS: f64 = 30.0;
 const MAX_SESSIONS: usize = 50;
 const MAX_CARS: usize = 50;
@@ -22,7 +22,7 @@ pub(crate) struct TelemetryRecorder {
 }
 
 struct RecorderState {
-    file: Option<File>,
+    file: Option<BufWriter<File>>,
     session_id: String,
     session_started_at: f64,
     last_sample_at: f64,
@@ -38,7 +38,7 @@ impl TelemetryRecorder {
         Ok(Self {
             dir,
             state: Mutex::new(RecorderState {
-                file: None,
+                file: None,  // type inferred as Option<BufWriter<File>>
                 session_id: String::new(),
                 session_started_at: 0.0,
                 last_sample_at: 0.0,
@@ -58,11 +58,13 @@ impl TelemetryRecorder {
 
         let race_on = payload.get("raceOn").and_then(Value::as_bool).unwrap_or(false);
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Race ended — close the current session so subsequent data starts a new one.
+        // Race ended — flush and close the current session so subsequent data starts a new one.
         if state.last_race_on == Some(true) && !race_on {
-            state.file = None;
+            if let Some(mut f) = state.file.take() {
+                let _ = f.flush();
+            }
         }
 
         let race_started = state.last_race_on == Some(false) && race_on;
@@ -79,7 +81,7 @@ impl TelemetryRecorder {
             let path = self.dir.join(format!("{session_id}.jsonl"));
             match OpenOptions::new().create(true).append(true).open(path) {
                 Ok(file) => {
-                    state.file = Some(file);
+                    state.file = Some(BufWriter::new(file));
                     state.session_id = session_id;
                     state.session_started_at = now;
                     state.last_sample_at = 0.0;
@@ -121,6 +123,60 @@ pub(crate) fn session_detail(dir: &Path, id: &str) -> Value {
     let summary = summarize_samples(id, &samples);
     let series = downsample_series(&samples, 360);
     json!({ "summary": summary, "samples": series })
+}
+
+pub(crate) fn session_track(dir: &Path, id: &str, max_points: usize) -> Value {
+    let Some(path) = safe_session_path(dir, id) else {
+        return json!({ "error": "not_found" });
+    };
+    let samples = read_samples(&path);
+    let summary = summarize_samples(id, &samples);
+    let mut raw_points = Vec::new();
+    let mut fallback_points = Vec::new();
+    for sample in &samples {
+        let x = get_f64(sample, &["position", "x"]);
+        let z = get_f64(sample, &["position", "z"]);
+        if !x.is_finite() || !z.is_finite() {
+            continue;
+        }
+        if x.abs() < f64::EPSILON && z.abs() < f64::EPSILON {
+            continue;
+        }
+        let source = sample
+            .pointer("/position/source")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let g_lat = get_f64(sample, &["gLat"]);
+        let g_long = get_f64(sample, &["gLong"]);
+        let point = json!({
+            "x": x,
+            "z": z,
+            "t": get_f64(sample, &["t"]),
+            "speed": get_f64(sample, &["speed"]),
+            "drift": get_f64(sample, &["drift"]),
+            "slip": get_f64(sample, &["slip"]),
+            "gLat": g_lat,
+            "gLong": g_long,
+            "gTotal": (g_lat * g_lat + g_long * g_long).sqrt(),
+            "raceOn": sample.get("raceOn").and_then(Value::as_bool).unwrap_or(false),
+            "source": source,
+        });
+        if source == "raw" {
+            raw_points.push(point);
+        } else {
+            fallback_points.push(point);
+        }
+    }
+    let using_raw = !raw_points.is_empty();
+    let mut points = if using_raw { raw_points } else { fallback_points };
+    if max_points > 0 && points.len() > max_points {
+        points = downsample_series(&points, max_points);
+    }
+    json!({
+        "summary": summary,
+        "points": points,
+        "trackSource": if using_raw { "raw" } else { "fallback" }
+    })
 }
 
 /// Reads power curve buckets straight from power_curves.json —
@@ -199,6 +255,11 @@ pub(crate) fn car_browser(power_curves_path: &Path, sessions_dir: &Path) -> Valu
 
 fn compact_sample(payload: &Value, session_id: &str, started_at: f64) -> Value {
     let at = get_f64(payload, &["receivedAt"]);
+    let slip_fl = get_f64(payload, &["tireCombinedSlip", "fl"]).abs();
+    let slip_fr = get_f64(payload, &["tireCombinedSlip", "fr"]).abs();
+    let slip_rl = get_f64(payload, &["tireCombinedSlip", "rl"]).abs();
+    let slip_rr = get_f64(payload, &["tireCombinedSlip", "rr"]).abs();
+    let slip_max = slip_fl.max(slip_fr).max(slip_rl).max(slip_rr);
     json!({
         "session": session_id,
         "at": at,
@@ -225,6 +286,12 @@ fn compact_sample(payload: &Value, session_id: &str, started_at: f64) -> Value {
         "gLat": get_f64(payload, &["motion", "gLat"]),
         "gLong": get_f64(payload, &["motion", "gLong"]),
         "drift": get_f64(payload, &["motion", "driftAngleDeg"]),
+        "slip": slip_max,
+        "position": {
+            "x": get_f64(payload, &["position", "x"]),
+            "y": get_f64(payload, &["position", "y"]),
+            "z": get_f64(payload, &["position", "z"]),
+        },
         "shiftNow": get_f64(payload, &["engine", "shiftNowRpm"]),
         "lap": {
             "number": get_f64(payload, &["lap", "number"]) as i64,
@@ -306,6 +373,8 @@ struct Summary {
     max_torque: f64,
     max_boost: f64,
     max_abs_g: f64,
+    max_lat_g: f64,
+    max_pure_lat_g: f64,
     max_drift: f64,
     throttle_sum: f64,
     brake_sum: f64,
@@ -348,6 +417,15 @@ impl Summary {
                 .abs()
                 .max(get_f64(sample, &["gLong"]).abs()),
         );
+        let lat_g = get_f64(sample, &["gLat"]).abs();
+        self.max_lat_g = self.max_lat_g.max(lat_g);
+        let long_g = get_f64(sample, &["gLong"]).abs();
+        let accel = get_f64(sample, &["accel"]);
+        let brake = get_f64(sample, &["brake"]);
+        let speed = get_f64(sample, &["speed"]);
+        if speed > 20.0 && long_g <= 0.25 && accel <= 0.2 && brake <= 0.2 {
+            self.max_pure_lat_g = self.max_pure_lat_g.max(lat_g);
+        }
         self.max_drift = self.max_drift.max(get_f64(sample, &["drift"]).abs());
         if get_f64(sample, &["speed"]) > 5.0 {
             self.throttle_sum += get_f64(sample, &["accel"]);
@@ -385,6 +463,8 @@ impl Summary {
             "maxTorque": self.max_torque,
             "maxBoost": self.max_boost,
             "maxAbsG": self.max_abs_g,
+            "maxLatG": self.max_lat_g,
+            "maxPureLatG": self.max_pure_lat_g,
             "maxDrift": self.max_drift,
             "avgThrottle": self.throttle_sum / moving,
             "avgBrake": self.brake_sum / moving,

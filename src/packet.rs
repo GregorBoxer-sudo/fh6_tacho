@@ -12,11 +12,7 @@ const EXTENDED_PACKET_LEN: usize = 324;  // minimum length for the extended form
 const EXTENDED_TYPE_OFFSET: usize = 232; // non-zero i32 here signals the extended format
 
 pub(crate) fn parse_forza_dash(packet: &[u8]) -> Value {
-    let dash = if packet.len() >= EXTENDED_PACKET_LEN && i32_at(packet, EXTENDED_TYPE_OFFSET, 0) != 0 {
-        DASH_OFFSET_EXTENDED
-    } else {
-        DASH_OFFSET_STANDARD
-    };
+    let dash = detect_dash_offset(packet);
     let speed_ms = f32_at(packet, dash + 12, 0.0) as f64;
     let rpm = f32_at(packet, 16, 0.0) as f64;
     let max_rpm = (f32_at(packet, 8, 1.0) as f64).max(1.0);
@@ -29,6 +25,9 @@ pub(crate) fn parse_forza_dash(packet: &[u8]) -> Value {
     let velocity_x = f32_at(packet, 32, 0.0) as f64;
     let velocity_y = f32_at(packet, 36, 0.0) as f64;
     let velocity_z = f32_at(packet, 40, 0.0) as f64;
+    let position_x = f32_at(packet, dash, 0.0) as f64;
+    let position_y = f32_at(packet, dash + 4, 0.0) as f64;
+    let position_z = f32_at(packet, dash + 8, 0.0) as f64;
     let yaw = f32_at(packet, 56, 0.0) as f64;
     let drift_angle = velocity_x.atan2(velocity_z).to_degrees();
     json!({
@@ -53,6 +52,11 @@ pub(crate) fn parse_forza_dash(packet: &[u8]) -> Value {
             "gLong": f32_at(packet, 28, 0.0) as f64 / 9.80665,
             "gVert": f32_at(packet, 24, 0.0) as f64 / 9.80665
         },
+        "position": {
+            "x": position_x,
+            "y": position_y,
+            "z": position_z
+        },
         "car": {
             "ordinal": i32_at(packet, 212, -1),
             "class": car_class_name(car_class),
@@ -63,9 +67,11 @@ pub(crate) fn parse_forza_dash(packet: &[u8]) -> Value {
             "cylinders": i32_at(packet, 228, 0),
             "typeId": if dash == DASH_OFFSET_EXTENDED { i32_at(packet, EXTENDED_TYPE_OFFSET, 0) } else { 0 }
         },
+        // These are normalised slip-angle values (same scale as tireCombinedSlip),
+        // NOT radians. Never apply .to_degrees() here.
         "tireSlipAngleDeg": {
-            "fl": (f32_at(packet, 164, 0.0) as f64).to_degrees(), "fr": (f32_at(packet, 168, 0.0) as f64).to_degrees(),
-            "rl": (f32_at(packet, 172, 0.0) as f64).to_degrees(), "rr": (f32_at(packet, 176, 0.0) as f64).to_degrees()
+            "fl": f32_at(packet, 164, 0.0) as f64, "fr": f32_at(packet, 168, 0.0) as f64,
+            "rl": f32_at(packet, 172, 0.0) as f64, "rr": f32_at(packet, 176, 0.0) as f64
         },
         "tireSlipRatio": {
             "fl": f32_at(packet, 84, 0.0), "fr": f32_at(packet, 88, 0.0),
@@ -75,9 +81,12 @@ pub(crate) fn parse_forza_dash(packet: &[u8]) -> Value {
             "fl": f32_at(packet, 180, 0.0), "fr": f32_at(packet, 184, 0.0),
             "rl": f32_at(packet, 188, 0.0), "rr": f32_at(packet, 192, 0.0)
         },
+        // Forza sends tyre temperatures in Fahrenheit; convert to Celsius on read.
         "tireTempC": {
-            "fl": f32_at(packet, dash + 24, 0.0), "fr": f32_at(packet, dash + 28, 0.0),
-            "rl": f32_at(packet, dash + 32, 0.0), "rr": f32_at(packet, dash + 36, 0.0)
+            "fl": fahrenheit_to_celsius(f32_at(packet, dash + 24, 0.0)),
+            "fr": fahrenheit_to_celsius(f32_at(packet, dash + 28, 0.0)),
+            "rl": fahrenheit_to_celsius(f32_at(packet, dash + 32, 0.0)),
+            "rr": fahrenheit_to_celsius(f32_at(packet, dash + 36, 0.0))
         },
         "boost": f32_at(packet, dash + 40, 0.0),
         "fuel": f32_at(packet, dash + 44, 0.0),
@@ -101,6 +110,74 @@ pub(crate) fn parse_forza_dash(packet: &[u8]) -> Value {
     })
 }
 
+fn detect_dash_offset(packet: &[u8]) -> usize {
+    if packet.len() < DASH_OFFSET_STANDARD + 77 {
+        return DASH_OFFSET_STANDARD;
+    }
+    if packet.len() < DASH_OFFSET_EXTENDED + 77 {
+        return DASH_OFFSET_STANDARD;
+    }
+
+    // Prefer a data-driven choice between both known offsets. This is more
+    // robust than relying solely on the optional type field at byte 232.
+    let score = |dash: usize| -> i32 {
+        let speed_ms = f32_at(packet, dash + 12, 0.0) as f64;
+        let power_w = f32_at(packet, dash + 16, 0.0) as f64;
+        let lap_current = f32_at(packet, dash + 60, 0.0) as f64;
+        let gear = u8_at(packet, dash + 75, 0);
+        let px = f32_at(packet, dash, 0.0) as f64;
+        let py = f32_at(packet, dash + 4, 0.0) as f64;
+        let pz = f32_at(packet, dash + 8, 0.0) as f64;
+        let mut s = 0;
+        if speed_ms.is_finite() {
+            if (0.0..=220.0).contains(&speed_ms) {
+                s += 4;
+            } else if (-20.0..=260.0).contains(&speed_ms) {
+                s += 2;
+            } else {
+                s -= 4;
+            }
+        }
+        if power_w.is_finite() && power_w.abs() <= 2_500_000.0 {
+            s += 1;
+        } else {
+            s -= 2;
+        }
+        if lap_current.is_finite() && (0.0..=50_000.0).contains(&lap_current) {
+            s += 1;
+        }
+        if gear <= 12 || gear == 255 {
+            s += 2;
+        } else {
+            s -= 2;
+        }
+        if px.is_finite() && py.is_finite() && pz.is_finite() {
+            if px.abs() <= 200_000.0 && py.abs() <= 50_000.0 && pz.abs() <= 200_000.0 {
+                s += 2;
+            } else {
+                s -= 2;
+            }
+        }
+        s
+    };
+
+    let standard_score = score(DASH_OFFSET_STANDARD);
+    let extended_score = score(DASH_OFFSET_EXTENDED);
+    if extended_score > standard_score {
+        return DASH_OFFSET_EXTENDED;
+    }
+    if standard_score > extended_score {
+        return DASH_OFFSET_STANDARD;
+    }
+
+    // Tie-breaker: keep the old heuristic.
+    if packet.len() >= EXTENDED_PACKET_LEN && i32_at(packet, EXTENDED_TYPE_OFFSET, 0) != 0 {
+        DASH_OFFSET_EXTENDED
+    } else {
+        DASH_OFFSET_STANDARD
+    }
+}
+
 fn car_class_name(id: i32) -> &'static str {
     match id {
         0 => "D",
@@ -121,6 +198,10 @@ fn drivetrain_name(id: i32) -> &'static str {
         2 => "AWD",
         _ => "-",
     }
+}
+
+fn fahrenheit_to_celsius(f: f32) -> f64 {
+    ((f - 32.0) * 5.0 / 9.0) as f64
 }
 
 pub(crate) fn f32_at(packet: &[u8], offset: usize, default: f32) -> f32 {

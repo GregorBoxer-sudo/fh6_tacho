@@ -10,7 +10,7 @@ use axum::{
 use futures_util::StreamExt;
 use rust_embed::RustEmbed;
 use serde_json::{Value, json};
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{net::UdpSocket, time};
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -23,6 +23,13 @@ struct StaticAssets;
 async fn static_handler(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
+    if path == "map.html" {
+        return Response::builder()
+            .status(StatusCode::PERMANENT_REDIRECT)
+            .header(header::LOCATION, "/analytics.html")
+            .body(Body::empty())
+            .unwrap();
+    }
     match StaticAssets::get(path) {
         Some(content) => {
             let mime = mime_guess::from_path(path)
@@ -37,9 +44,12 @@ async fn static_handler(uri: Uri) -> Response {
     }
 }
 
-use crate::util::now_seconds;
+use crate::util::{get_f64, now_seconds};
 use crate::{
-    analytics::{TelemetryRecorder, car_browser, car_power_curve, list_sessions, session_detail},
+    analytics::{
+        TelemetryRecorder, car_browser, car_power_curve, list_sessions, session_detail,
+        session_track,
+    },
     config::Args,
     logging::PacketInspector,
     packet::parse_forza_dash,
@@ -64,11 +74,13 @@ pub(crate) async fn udp_loop(
     };
     println!("UDP telemetry listening on {addr}");
     let mut buf = vec![0u8; 2048];
+    let mut position_fallback = PositionFallback::new();
     loop {
         let (len, _) = sock.recv_from(&mut buf).await?;
         if len >= 232 {
             let mut decoded = parse_forza_dash(&buf[..len]);
             enrich_shift_data(&mut decoded, Some(&power_curves));
+            position_fallback.apply(&mut decoded);
             recorder.record(&decoded);
             if let Some(inspector) = &inspector {
                 inspector.inspect(&buf[..len], &decoded);
@@ -80,6 +92,93 @@ pub(crate) async fn udp_loop(
                 &json!({ "receivedAt": now_seconds(), "packetBytes": len, "tooShort": true }),
             );
         }
+    }
+}
+
+struct PositionFallback {
+    x: f64,
+    z: f64,
+    last_at: Option<f64>,
+    initialized: bool,
+}
+
+impl PositionFallback {
+    fn new() -> Self {
+        Self {
+            x: 0.0,
+            z: 0.0,
+            last_at: None,
+            initialized: false,
+        }
+    }
+
+    fn apply(&mut self, payload: &mut Value) {
+        let at = get_f64(payload, &["receivedAt"]);
+        if !at.is_finite() || at <= 0.0 {
+            return;
+        }
+
+        let raw_x = get_f64(payload, &["position", "x"]);
+        let raw_z = get_f64(payload, &["position", "z"]);
+        let raw_y = get_f64(payload, &["position", "y"]);
+        let speed_ms = get_f64(payload, &["speed", "ms"]).max(0.0);
+        let yaw = get_f64(payload, &["motion", "yaw"]);
+        let vel_x = get_f64(payload, &["motion", "velocityX"]);
+        let vel_z = get_f64(payload, &["motion", "velocityZ"]);
+
+        let dt = self
+            .last_at
+            .map(|prev| (at - prev).clamp(0.0, 0.35))
+            .unwrap_or(0.0);
+        self.last_at = Some(at);
+
+        let raw_is_nonzero = raw_x.abs() > f64::EPSILON || raw_z.abs() > f64::EPSILON;
+        let raw_is_valid = raw_x.is_finite()
+            && raw_z.is_finite()
+            && (raw_is_nonzero || speed_ms < 0.8);
+
+        if raw_is_valid {
+            self.x = raw_x;
+            self.z = raw_z;
+            self.initialized = true;
+            payload["position"] = json!({
+                "x": self.x,
+                "y": raw_y,
+                "z": self.z,
+                "source": "raw"
+            });
+            return;
+        }
+
+        if !self.initialized {
+            self.x = 0.0;
+            self.z = 0.0;
+            self.initialized = true;
+        }
+
+        if dt > 0.0 {
+            let (dx, dz) = if speed_ms > 0.5 && yaw.is_finite() {
+                // Use heading + speed when available.
+                (yaw.sin() * speed_ms * dt, yaw.cos() * speed_ms * dt)
+            } else if yaw.is_finite() {
+                // Fallback to rotating local velocity into world space by yaw.
+                (
+                    (yaw.cos() * vel_x + yaw.sin() * vel_z) * dt,
+                    (-yaw.sin() * vel_x + yaw.cos() * vel_z) * dt,
+                )
+            } else {
+                (0.0, vel_z * dt)
+            };
+            self.x += dx;
+            self.z += dz;
+        }
+
+        payload["position"] = json!({
+            "x": self.x,
+            "y": raw_y,
+            "z": self.z,
+            "source": "integrated"
+        });
     }
 }
 
@@ -97,8 +196,12 @@ pub(crate) async fn demo_loop(
         let rpm_ratio = 0.25 + (t * 1.7).sin().abs() * 0.75;
         let rpm = 900.0 + rpm_ratio * 7200.0;
         let gear = ((speed / 45.0) as i64 + 1).clamp(1, 7);
+        let map_t = t * 0.18;
+        let pos_x = map_t.cos() * 840.0;
+        let pos_z = map_t.sin() * 520.0;
         let mut payload = json!({
             "receivedAt": now_seconds(), "packetBytes": 324, "raceOn": true, "timestampMs": (t * 1000.0) as u64,
+            "position": { "x": pos_x, "y": 0.0, "z": pos_z },
             "speed": { "ms": speed / 3.6, "kmh": speed, "mph": speed / 1.60934 },
             "engine": { "rpm": rpm, "maxRpm": 8500.0, "idleRpm": 900.0, "rpmRatio": rpm / 8500.0,
                 "powerHp": 420.0 + (t * 2.0).sin() * 80.0, "powerKw": 315.0, "torqueNm": 620.0 + (t * 2.2).sin() * 120.0 },
@@ -126,7 +229,11 @@ pub(crate) async fn demo_loop(
 }
 
 async fn status(State(state): State<AppState>) -> Json<Value> {
-    Json(state.hub.status())
+    let mut status = state.hub.status();
+    if let Some(object) = status.as_object_mut() {
+        object.insert("debugMode".to_string(), json!(state.debug_mode));
+    }
+    Json(status)
 }
 
 async fn events(State(state): State<AppState>) -> impl IntoResponse {
@@ -153,6 +260,13 @@ async fn api_session(
     Json(session_detail(&state.data_dir.join("drive_sessions"), &id))
 }
 
+async fn api_session_track(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<Value> {
+    Json(session_track(&state.data_dir.join("drive_sessions"), &id, 12000))
+}
+
 async fn api_cars(State(state): State<AppState>) -> Json<Value> {
     Json(car_browser(
         &state.data_dir.join("power_curves.json"),
@@ -167,19 +281,127 @@ async fn api_car_powercurve(
     Json(car_power_curve(&state.data_dir.join("power_curves.json"), &key))
 }
 
+fn default_calibration() -> Value {
+    json!({
+        "version": 1,
+        "mapImage": "map.jpg",
+        "worldFlipX": false,
+        "worldFlipZ": false,
+        "points": []
+    })
+}
+
+fn map_calibration_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("map_calibration.json")
+}
+
+async fn api_map_calibration(State(state): State<AppState>) -> Json<Value> {
+    let path = map_calibration_path(&state.data_dir);
+    let mut calibration = fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(default_calibration);
+    if let Some(object) = calibration.as_object_mut() {
+        object.insert("debugMode".to_string(), json!(state.debug_mode));
+    }
+    Json(calibration)
+}
+
+async fn api_save_map_calibration(
+    State(state): State<AppState>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    if !state.debug_mode {
+        return Json(json!({ "ok": false, "error": "debug_mode_required" }));
+    }
+    let Some(input) = payload.as_object() else {
+        return Json(json!({ "ok": false, "error": "invalid_payload" }));
+    };
+    let mut points = Vec::new();
+    for point in input
+        .get("points")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(256)
+    {
+        let world_x = point
+            .pointer("/world/x")
+            .and_then(Value::as_f64)
+            .unwrap_or(f64::NAN);
+        let world_z = point
+            .pointer("/world/z")
+            .and_then(Value::as_f64)
+            .unwrap_or(f64::NAN);
+        let pixel_x = point
+            .pointer("/pixel/x")
+            .and_then(Value::as_f64)
+            .unwrap_or(f64::NAN);
+        let pixel_y = point
+            .pointer("/pixel/y")
+            .and_then(Value::as_f64)
+            .unwrap_or(f64::NAN);
+        if !(world_x.is_finite() && world_z.is_finite() && pixel_x.is_finite() && pixel_y.is_finite()) {
+            continue;
+        }
+        points.push(json!({
+            "world": { "x": world_x, "z": world_z },
+            "pixel": { "x": pixel_x, "y": pixel_y },
+            "label": point.get("label").and_then(Value::as_str).unwrap_or(""),
+        }));
+    }
+    let map_image = input
+        .get("mapImage")
+        .and_then(Value::as_str)
+        .unwrap_or("map.jpg");
+    let world_flip_x = input
+        .get("worldFlipX")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let world_flip_z = input
+        .get("worldFlipZ")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let normalized = json!({
+        "version": 1,
+        "mapImage": map_image,
+        "worldFlipX": world_flip_x,
+        "worldFlipZ": world_flip_z,
+        "points": points
+    });
+    let path = map_calibration_path(&state.data_dir);
+    match serde_json::to_string_pretty(&normalized)
+        .ok()
+        .and_then(|raw| fs::write(path, raw).ok())
+    {
+        Some(()) => Json(json!({ "ok": true, "points": points.len() })),
+        None => Json(json!({ "ok": false, "error": "write_failed" })),
+    }
+}
+
 pub(crate) async fn run_http(
     data_dir: PathBuf,
     hub: Arc<TelemetryHub>,
     args: &Args,
 ) -> Result<()> {
-    let state = AppState { hub, data_dir };
+    let state = AppState {
+        hub,
+        data_dir,
+        debug_mode: args.debug,
+    };
     let app = Router::new()
         .route("/events", get(events))
         .route("/api/status", get(status))
         .route("/api/analytics/sessions", get(api_sessions))
         .route("/api/analytics/sessions/{id}", get(api_session))
+        .route("/api/analytics/sessions/{id}/track", get(api_session_track))
         .route("/api/analytics/cars", get(api_cars))
         .route("/api/analytics/cars/{key}/powercurve", get(api_car_powercurve))
+        .route(
+            "/api/map/calibration",
+            get(api_map_calibration).post(api_save_map_calibration),
+        )
         .fallback(static_handler)
         .with_state(state);
     let addr: SocketAddr = format!("{}:{}", args.http_host, args.http_port)

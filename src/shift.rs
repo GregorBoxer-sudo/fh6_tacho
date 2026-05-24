@@ -11,11 +11,17 @@ use crate::logging::ShiftCacheLogger;
 use crate::util::*;
 
 pub(crate) struct PowerCurveStore {
+    #[allow(dead_code)]
     path: PathBuf,
     curves: Mutex<Map<String, Value>>,
     logger: Option<Arc<ShiftCacheLogger>>,
     limiter_log: bool,
     limiter_debug: bool,
+    /// Channel to the background save-worker thread.
+    /// Bounded at 2 so try_send never blocks; if the worker is busy the
+    /// in-progress write already holds the full current state — dropping
+    /// an intermediate snapshot is safe.
+    save_tx: std::sync::mpsc::SyncSender<String>,
 }
 
 impl PowerCurveStore {
@@ -31,24 +37,44 @@ impl PowerCurveStore {
             .and_then(|text| serde_json::from_str::<Value>(&text).ok())
             .and_then(|value| value.as_object().cloned())
             .unwrap_or_default();
+        let save_tx = Self::spawn_save_worker(path.clone());
         Self {
             path,
             curves: Mutex::new(curves),
             logger,
             limiter_log,
             limiter_debug,
+            save_tx,
         }
     }
 
-    fn save_locked(&self, curves: &Map<String, Value>) {
-        if let Some(parent) = self.path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let tmp = self.path.with_extension("tmp");
-        if let Ok(text) = serde_json::to_string(curves)
-            && fs::write(&tmp, text).is_ok()
-        {
-            let _ = fs::rename(tmp, &self.path);
+    /// Spawns a dedicated thread that receives serialised JSON and writes it
+    /// atomically to disk.  Lives for the lifetime of the process.
+    fn spawn_save_worker(path: PathBuf) -> std::sync::mpsc::SyncSender<String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<String>(2);
+        std::thread::Builder::new()
+            .name("curve-save".into())
+            .spawn(move || {
+                if let Some(parent) = path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                while let Ok(json) = rx.recv() {
+                    let tmp = path.with_extension("tmp");
+                    if fs::write(&tmp, &json).is_ok() {
+                        let _ = fs::rename(&tmp, &path);
+                    }
+                }
+            })
+            .expect("curve-save thread");
+        tx
+    }
+
+    /// Serialise `curves` and hand the bytes off to the save-worker.
+    /// Never blocks — if the worker already has two pending writes the
+    /// current snapshot is dropped (the next save will include it anyway).
+    fn queue_save(&self, curves: &Map<String, Value>) {
+        if let Ok(text) = serde_json::to_string(curves) {
+            let _ = self.save_tx.try_send(text);
         }
     }
 
@@ -114,7 +140,7 @@ impl PowerCurveStore {
         let idle_rpm = get_child_f64(engine, "idleRpm");
         let now = get_f64(payload, &["receivedAt"]);
         let mut save = false;
-        let mut curves = self.curves.lock().unwrap();
+        let mut curves = self.curves.lock().unwrap_or_else(|e| e.into_inner());
         let curve = Self::curve_mut(&mut curves, &key);
 
         if get_curve_i64(curve, "shiftStrategyVersion") != SHIFT_CACHE_STRATEGY_VERSION {
@@ -159,7 +185,7 @@ impl PowerCurveStore {
         }
         curve.insert("lastSeenAt".to_string(), json!(now));
         if reset || stale || save {
-            self.save_locked(&curves);
+            self.queue_save(&curves);
         }
     }
 
@@ -173,7 +199,7 @@ impl PowerCurveStore {
         if key.is_empty() || gear <= 0 || rpm < 1500.0 {
             return (0.0, 0, 0.0);
         }
-        let mut curves = self.curves.lock().unwrap();
+        let mut curves = self.curves.lock().unwrap_or_else(|e| e.into_inner());
         let (observed, bounce_count, bounce_confirmed, should_save) = {
             let curve = Self::curve_mut(&mut curves, &key);
             let previous = curve.get("lastLimitSample").unwrap_or(&Value::Null);
@@ -329,7 +355,7 @@ impl PowerCurveStore {
             (get_curve_f64(curve, "maxObservedRpm"), bounce_count, bounce_confirmed, should_save)
         };
         if should_save {
-            self.save_locked(&curves);
+            self.queue_save(&curves);
         }
         (observed, bounce_count, bounce_confirmed)
     }
@@ -339,7 +365,7 @@ impl PowerCurveStore {
         let key = power_curve_key(payload);
         let gear = learned_forward_gear(payload);
         if key.is_empty() || gear <= 0 {
-            let curves = self.curves.lock().unwrap();
+            let curves = self.curves.lock().unwrap_or_else(|e| e.into_inner());
             let observed = curves
                 .get(&key)
                 .and_then(Value::as_object)
@@ -351,7 +377,7 @@ impl PowerCurveStore {
                 observed
             };
         }
-        let mut curves = self.curves.lock().unwrap();
+        let mut curves = self.curves.lock().unwrap_or_else(|e| e.into_inner());
         let (observed, should_save) = {
             let curve = Self::curve_mut(&mut curves, &key);
             let previous = get_curve_i64(curve, "maxObservedGear");
@@ -367,7 +393,7 @@ impl PowerCurveStore {
             (get_curve_i64(curve, "maxObservedGear"), should_save)
         };
         if should_save {
-            self.save_locked(&curves);
+            self.queue_save(&curves);
         }
         if is_electric(payload) {
             observed.max(1)
@@ -384,7 +410,7 @@ impl PowerCurveStore {
         if key.is_empty() || gear <= 0 || rpm < 1000.0 {
             return;
         }
-        let mut curves = self.curves.lock().unwrap();
+        let mut curves = self.curves.lock().unwrap_or_else(|e| e.into_inner());
         let should_save = {
             let curve = Self::curve_mut(&mut curves, &key);
             let previous = curve.get("lastShiftSample").unwrap_or(&Value::Null);
@@ -431,7 +457,7 @@ impl PowerCurveStore {
             should_save
         };
         if should_save {
-            self.save_locked(&curves);
+            self.queue_save(&curves);
         }
     }
 
@@ -443,7 +469,7 @@ impl PowerCurveStore {
         if key.is_empty() || gear <= 0 || rpm < 1000.0 {
             return 0.0;
         }
-        let mut curves = self.curves.lock().unwrap();
+        let mut curves = self.curves.lock().unwrap_or_else(|e| e.into_inner());
         let curve = Self::curve_mut(&mut curves, &key);
         let previous = curve.get("lastRpmRateSample").unwrap_or(&Value::Null);
         let previous_gear = get_child_i64(previous, "gear");
@@ -500,7 +526,7 @@ impl PowerCurveStore {
             return;
         }
         let bucket = bucket_key(rpm);
-        let mut curves = self.curves.lock().unwrap();
+        let mut curves = self.curves.lock().unwrap_or_else(|e| e.into_inner());
         let curve = Self::curve_mut(&mut curves, &key);
         let buckets = ensure_object(curve, "buckets");
         let is_new_bucket = !buckets.contains_key(&bucket);
@@ -523,7 +549,7 @@ impl PowerCurveStore {
         }
         curve.insert("updatedAt".to_string(), json!(now_seconds()));
         if samples == 1 || samples % 20 == 0 {
-            self.save_locked(&curves);
+            self.queue_save(&curves);
         }
     }
 
@@ -539,7 +565,7 @@ impl PowerCurveStore {
         if key.is_empty() || gear <= 0 {
             return None;
         }
-        let mut curves = self.curves.lock().unwrap();
+        let mut curves = self.curves.lock().unwrap_or_else(|e| e.into_inner());
         let curve = Self::curve_mut(&mut curves, &key);
         let gear_key = gear.to_string();
 
@@ -582,7 +608,7 @@ impl PowerCurveStore {
                 ) {
                     Some(true) => {
                         set_add(curve, "validatedShiftGears", &gear_key);
-                        self.save_locked(&curves);
+                        self.queue_save(&curves);
                         if let Some(logger) = &self.logger {
                             logger.log(
                                 "cache_validated",
@@ -607,7 +633,7 @@ impl PowerCurveStore {
                         object_remove_key(curve, "shiftWarningRpmByGear", &gear_key);
                         set_remove(curve, "validatedShiftGears", &gear_key);
                         set_add(curve, "dirtyShiftGears", &gear_key);
-                        self.save_locked(&curves);
+                        self.queue_save(&curves);
                         if let Some(logger) = &self.logger {
                             logger.log(
                                 "cache_invalidated",
@@ -660,7 +686,7 @@ impl PowerCurveStore {
         }
         set_remove(curve, "dirtyShiftGears", &gear_key);
         curve.insert("updatedAt".to_string(), json!(now_seconds()));
-        self.save_locked(&curves);
+        self.queue_save(&curves);
         learned
     }
 

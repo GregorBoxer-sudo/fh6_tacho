@@ -9,6 +9,7 @@ use tokio::sync::broadcast;
 pub(crate) struct AppState {
     pub(crate) hub: Arc<TelemetryHub>,
     pub(crate) data_dir: PathBuf,
+    pub(crate) debug_mode: bool,
 }
 
 pub(crate) struct TelemetryHub {
@@ -32,24 +33,24 @@ impl TelemetryHub {
 
     pub(crate) fn publish(&self, payload: &Value) {
         let message = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
-        *self.packet_count.lock().unwrap() += 1;
-        *self.last_packet_at.lock().unwrap() = Some(std::time::Instant::now());
-        *self.last_value.lock().unwrap() = Some(payload.clone());
+        *self.packet_count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        *self.last_packet_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        *self.last_value.lock().unwrap_or_else(|e| e.into_inner()) = Some(payload.clone());
         let _ = self.tx.send(message);
     }
 
     /// Returns the most recently received telemetry packet, or `None` if no
     /// packet has been received yet.  Cheap clone of a small JSON value.
     pub(crate) fn latest(&self) -> Option<Value> {
-        self.last_value.lock().unwrap().clone()
+        self.last_value.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub(crate) fn status(&self) -> Value {
-        let packets = *self.packet_count.lock().unwrap();
+        let packets = *self.packet_count.lock().unwrap_or_else(|e| e.into_inner());
         let age_ms = self
             .last_packet_at
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .map(|at| at.elapsed().as_millis() as u64);
         json!({ "packets": packets, "ageMs": age_ms })
     }

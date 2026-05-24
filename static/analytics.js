@@ -1,4 +1,6 @@
 const $ = (id) => document.getElementById(id);
+const DETAIL_MAP_COLOR_KEY = "forzaAnalyticsMapColorMode";
+const DETAIL_MAP_COLOR_MODES = ["plain", "speed", "drift", "slip", "gLat", "gTotal"];
 
 let sessions        = [];
 let cars            = [];
@@ -7,10 +9,72 @@ let selectedCar     = "";
 let currentCar      = null;   // car object for tab switching
 let carPowerPoints  = [];     // preloaded curve data
 let activeCarChart  = "shifts"; // "shifts" | "power"
+let detailTrack     = [];
+let detailTrackSrc  = "";
+let detailSamples   = [];
+let mapColorMode    = "plain";
+let mapCalibration  = { points: [], worldFlipX: false, worldFlipZ: false, mapImage: "map.jpg" };
+let mapImage        = null;
+let mapImageLoaded  = false;
+let mapImageProcessed = null;
+let mapDebugMode    = false;
+let mapPendingWorld = null;
+let mapLivePosition = null;
+let mapLiveSource   = null;
+let detailMapTransformCache = null;
+let detailProjectedTrack = [];
+let detailProjectionDirty = true;
+let detailMapDrawQueued = false;
+let detailMapView   = {
+  scale: 1,
+  tx: 0,
+  ty: 0,
+  initialized: false,
+  pointer: {
+    down: false,
+    moved: false,
+    startX: 0,
+    startY: 0,
+    startTx: 0,
+    startTy: 0,
+  },
+};
 
 function num(value, digits = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n.toFixed(digits) : (0).toFixed(digits);
+}
+
+function setDetailMapHint(text) {
+  $("detailMapHint").textContent = text || "";
+}
+
+function invalidateDetailProjection() {
+  detailMapTransformCache = null;
+  detailProjectedTrack = [];
+  detailProjectionDirty = true;
+}
+
+function scheduleDetailMapDraw() {
+  if (detailMapDrawQueued) return;
+  detailMapDrawQueued = true;
+  requestAnimationFrame(() => {
+    detailMapDrawQueued = false;
+    drawDetailMap(detailTrack);
+  });
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function quantile(sorted, q) {
+  if (!sorted.length) return 0;
+  const pos = clamp(q, 0, 1) * (sorted.length - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.min(sorted.length - 1, lo + 1);
+  const t = pos - lo;
+  return sorted[lo] * (1 - t) + sorted[hi] * t;
 }
 
 function timeText(seconds) {
@@ -25,12 +89,42 @@ async function loadJson(path) {
 }
 
 async function refresh() {
-  const [sessionData, carData] = await Promise.all([
+  const [sessionData, carData, calibrationData] = await Promise.all([
     loadJson("/api/analytics/sessions"),
     loadJson("/api/analytics/cars"),
+    loadJson("/api/map/calibration"),
   ]);
   sessions = sessionData.sessions || [];
   cars     = carData.cars         || [];
+  mapDebugMode = !!calibrationData.debugMode;
+  mapCalibration = {
+    mapImage: typeof calibrationData.mapImage === "string" ? calibrationData.mapImage : "map.jpg",
+    worldFlipX: !!calibrationData.worldFlipX,
+    worldFlipZ: !!calibrationData.worldFlipZ,
+    points: Array.isArray(calibrationData.points)
+      ? calibrationData.points.filter((p) =>
+          Number.isFinite(p?.world?.x) &&
+          Number.isFinite(p?.world?.z) &&
+          Number.isFinite(p?.pixel?.x) &&
+          Number.isFinite(p?.pixel?.y)
+        )
+      : [],
+  };
+  invalidateDetailProjection();
+  if (!mapDebugMode) {
+    mapPendingWorld = null;
+  }
+  updateCalibrationDerivedState();
+  renderPendingPoint();
+  renderPointList();
+  toggleCalibrationPane();
+  refreshAxisButtons();
+  if (mapDebugMode) {
+    startMapLiveStream();
+  } else {
+    stopMapLiveStream();
+  }
+  ensureDetailMapImage();
   renderOverview();
   renderSessions();
   renderCars();
@@ -46,6 +140,7 @@ function renderOverview() {
   $("carCount").textContent     = cars.length;
   $("topSpeed").textContent     = `${num(Math.max(0, ...sessions.map((s) => s.maxSpeed || 0)))} km/h`;
   $("topG").textContent         = `${num(Math.max(0, ...sessions.map((s) => s.maxAbsG  || 0)), 2)}g`;
+  $("topPureLatG").textContent  = `${num(Math.max(0, ...sessions.map((s) => s.maxPureLatG || 0)), 2)}g`;
 }
 
 // ── Session List ────────────────────────────────────────────────────────────
@@ -94,13 +189,24 @@ async function selectSession(id) {
   renderSessions();
   renderCars();
   $("chartTabs").style.display = "none";
-  const detail = await loadJson(`/api/analytics/sessions/${encodeURIComponent(id)}`);
+  $("detailMapSection").style.display = "";
+  const [detail, trackData] = await Promise.all([
+    loadJson(`/api/analytics/sessions/${encodeURIComponent(id)}`),
+    loadJson(`/api/analytics/sessions/${encodeURIComponent(id)}/track`),
+  ]);
+  detailTrack    = Array.isArray(trackData.points) ? trackData.points : [];
+  detailTrackSrc = typeof trackData.trackSource === "string" ? trackData.trackSource : "";
+  invalidateDetailProjection();
   renderDetail(detail.summary || {}, detail.samples || []);
+  scheduleDetailMapDraw();
 }
 
 async function selectCar(key) {
   selectedCar     = key;
   selectedSession = "";
+  detailTrack     = [];
+  detailTrackSrc  = "";
+  invalidateDetailProjection();
   renderSessions();
   renderCars();
 
@@ -108,6 +214,7 @@ async function selectCar(key) {
   activeCarChart = "shifts";
   setActiveTab("shifts");
   $("chartTabs").style.display = "";
+  $("detailMapSection").style.display = "none";
 
   // Show detail immediately, curve loads in parallel
   if (currentCar) renderCarDetail(currentCar);
@@ -138,6 +245,7 @@ document.querySelectorAll(".chartTab").forEach((btn) => {
 // ── Session Detail ───────────────────────────────────────────────────────────
 
 function renderDetail(summary, samples) {
+  detailSamples = Array.isArray(samples) ? samples : [];
   $("detailTitle").textContent = `${summary.carKey || "Session"} · ${timeText(summary.duration)}`;
   const stats = [
     ["Top Speed", `${num(summary.maxSpeed)} km/h`],
@@ -146,6 +254,7 @@ function renderDetail(summary, samples) {
     ["Torque",    `${num(summary.maxTorque)} Nm`],
     ["Boost",     `${num(summary.maxBoost, 2)}`],
     ["Max G",     `${num(summary.maxAbsG, 2)}g`],
+    ["Pure Lat G",`${num(summary.maxPureLatG, 2)}g`],
     ["Drift",     `${num(summary.maxDrift)} deg`],
     ["Shifts",    `${summary.shiftCount || 0}`],
   ];
@@ -159,8 +268,9 @@ function renderDetail(summary, samples) {
     <span>Ø Throttle ${num((summary.avgThrottle || 0) * 100)}%</span>
     <span>Ø Brake ${num((summary.avgBrake || 0) * 100)}%</span>
     <span>Best Lap ${summary.bestLap ? timeText(summary.bestLap) : "--"}</span>
+    <span>Track Src ${detailTrackSrc || "-"}</span>
   `;
-  drawSessionChart(samples);
+  drawSessionChart(detailSamples);
 }
 
 // ── Car Detail ───────────────────────────────────────────────────────────────
@@ -204,12 +314,27 @@ function legendItem(ctx, x, y, color, label) {
   ctx.fillText(label, x + 15, y);
 }
 
+function prepareSessionChartCanvas() {
+  const canvas = $("sessionChart");
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.round(rect.width * dpr));
+  const height = Math.max(1, Math.round(rect.height * dpr));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  const ctx = canvas.getContext("2d");
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
+
 // ── Session Progress Chart ───────────────────────────────────────────────────
 
 function drawSessionChart(samples) {
-  const canvas = $("sessionChart");
-  const ctx = canvas.getContext("2d");
-  const w = canvas.width, h = canvas.height;
+  const { ctx, w, h } = prepareSessionChartCanvas();
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#070a0b";
   ctx.fillRect(0, 0, w, h);
@@ -241,9 +366,7 @@ function drawSeries(ctx, samples, key, color, w, h, max) {
 // ── Car: Shift Points Bar Chart ──────────────────────────────────────────────
 
 function drawCarChart(car) {
-  const canvas = $("sessionChart");
-  const ctx = canvas.getContext("2d");
-  const w = canvas.width, h = canvas.height;
+  const { ctx, w, h } = prepareSessionChartCanvas();
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#070a0b";
   ctx.fillRect(0, 0, w, h);
@@ -319,9 +442,7 @@ function smooth(pts, key, radius = 2) {
 }
 
 function drawCarPowerCurve(pts) {
-  const canvas = $("sessionChart");
-  const ctx = canvas.getContext("2d");
-  const w = canvas.width, h = canvas.height;
+  const { ctx, w, h } = prepareSessionChartCanvas();
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#070a0b";
   ctx.fillRect(0, 0, w, h);
@@ -439,8 +560,661 @@ function markPeak(ctx, pt, key, maxVal, color, pad, cW, cH, minRpm, rpmRange, un
   ctx.fillText(label, lx, y - 7);
 }
 
+// ── Session Map (Analytics Detail) ───────────────────────────────────────────
+
+function toggleCalibrationPane() {
+  $("detailCalibrationPane").hidden = !mapDebugMode;
+}
+
+function refreshAxisButtons() {
+  $("detailFlipXBtn").classList.toggle("active", !!mapCalibration.worldFlipX);
+  $("detailFlipZBtn").classList.toggle("active", !!mapCalibration.worldFlipZ);
+}
+
+function renderPendingPoint() {
+  if (!mapPendingWorld) {
+    $("detailPendingPoint").textContent = "none";
+    return;
+  }
+  $("detailPendingPoint").textContent = `W(${num(mapPendingWorld.x, 2)}, ${num(mapPendingWorld.z, 2)})`;
+}
+
+function renderCalibrationInfo(transform = null) {
+  if (transform === null) {
+    ensureDetailProjection();
+    transform = detailMapTransformCache;
+  }
+  const info = $("detailCalibrationInfo");
+  if (!mapDebugMode) {
+    info.innerHTML = "<strong>Debug mode off</strong><span>Start app with --debug to calibrate.</span>";
+    return;
+  }
+  if (!transform) {
+    info.innerHTML = "<strong>Calibration</strong><span>Add at least 3 points to compute transform.</span>";
+    return;
+  }
+  info.innerHTML = `
+    <strong>Calibration</strong>
+    <span>Points: ${transform.points}</span>
+    <span>Model: ${transform.kind || "unknown"}</span>
+    <span>RMS error: ${num(transform.error, 2)} px</span>
+  `;
+}
+
+function nearestTrackDistanceWorld(wx, wz) {
+  if (!Array.isArray(detailTrack) || !detailTrack.length) return Infinity;
+  let best = Infinity;
+  for (const p of detailTrack) {
+    const dx = Number(p.x) - wx;
+    const dz = Number(p.z) - wz;
+    if (!Number.isFinite(dx) || !Number.isFinite(dz)) continue;
+    const d = Math.hypot(dx, dz);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+function nearestTrackDistancePixel(px, py, projectedTrack) {
+  if (!Array.isArray(projectedTrack) || !projectedTrack.length) return Infinity;
+  let best = Infinity;
+  for (const p of projectedTrack) {
+    const d = Math.hypot(p.x - px, p.y - py);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+function renderPointList() {
+  const list = $("detailPointList");
+  if (!mapDebugMode) {
+    list.innerHTML = "";
+    return;
+  }
+  ensureDetailProjection();
+  const transform = detailMapTransformCache;
+  const projectedTrack = detailProjectedTrack;
+  list.innerHTML = (mapCalibration.points || []).map((p, i) => {
+    const worldD = nearestTrackDistanceWorld(p.world.x, p.world.z);
+    const proj = transform ? projectDetailPoint(p.world, transform) : null;
+    const pixelD = proj ? nearestTrackDistancePixel(proj.x, proj.y, projectedTrack) : Infinity;
+    const worldText = Number.isFinite(worldD) ? `world Δ ${num(worldD, 1)}m` : "world Δ --";
+    const pixelText = Number.isFinite(pixelD) ? `px Δ ${num(pixelD, 1)}` : "px Δ --";
+    return `
+      <div class="pointRow">
+        <span>#${i + 1} W(${num(p.world.x, 2)}, ${num(p.world.z, 2)}) -> P(${num(p.pixel.x, 1)}, ${num(p.pixel.y, 1)}) | ${worldText} | ${pixelText}</span>
+        <button type="button" data-detail-del="${i}">delete</button>
+      </div>
+    `;
+  }).join("");
+  document.querySelectorAll("[data-detail-del]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const index = Number(btn.dataset.detailDel);
+      if (!Number.isInteger(index) || index < 0) return;
+      mapCalibration.points.splice(index, 1);
+      updateCalibrationDerivedState();
+      scheduleDetailMapDraw();
+    });
+  });
+}
+
+function updateCalibrationDerivedState() {
+  invalidateDetailProjection();
+  renderCalibrationInfo();
+  renderPointList();
+}
+
+function setLiveMapPosition(payload) {
+  const x = Number(payload?.position?.x);
+  const z = Number(payload?.position?.z);
+  const speed = Number(payload?.speed?.ms);
+  const source = typeof payload?.position?.source === "string" ? payload.position.source : "raw";
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+  mapLivePosition = { x, z, speed: Number.isFinite(speed) ? speed : 0, source };
+  $("detailLivePosition").textContent = `W(${num(x, 2)}, ${num(z, 2)}) · ${source}`;
+}
+
+function startMapLiveStream() {
+  if (mapLiveSource) return;
+  mapLiveSource = new EventSource("/events");
+  mapLiveSource.addEventListener("telemetry", (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      setLiveMapPosition(payload);
+    } catch (_) {
+      // ignore malformed frames
+    }
+  });
+}
+
+function stopMapLiveStream() {
+  if (!mapLiveSource) return;
+  mapLiveSource.close();
+  mapLiveSource = null;
+}
+
+async function saveDetailCalibration() {
+  if ((mapCalibration.points || []).length < 3) {
+    setDetailMapHint("Calibration needs at least 3 points.");
+    return;
+  }
+  const payload = {
+    version: 1,
+    mapImage: mapCalibration.mapImage || "map.jpg",
+    worldFlipX: !!mapCalibration.worldFlipX,
+    worldFlipZ: !!mapCalibration.worldFlipZ,
+    points: mapCalibration.points || [],
+  };
+  const res = await fetch("/api/map/calibration", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    setDetailMapHint(`Save failed: ${data.error || "unknown"}`);
+    return;
+  }
+  setDetailMapHint(`Calibration saved (${data.points || 0} points)`);
+}
+
+function ensureDetailMapImage() {
+  const src = `/${mapCalibration.mapImage || "map.jpg"}`;
+  if (mapImage && mapImage.src.endsWith(src)) return;
+  mapImageLoaded = false;
+  mapImageProcessed = null;
+  mapImage = new Image();
+  mapImage.onload = () => {
+    mapImageLoaded = true;
+    detailMapView.initialized = false;
+    // Pre-render reduced-saturation map once to keep pan/zoom responsive.
+    const processed = document.createElement("canvas");
+    processed.width = mapImage.width;
+    processed.height = mapImage.height;
+    const pctx = processed.getContext("2d");
+    pctx.filter = "saturate(0.72) contrast(0.94)";
+    pctx.drawImage(mapImage, 0, 0);
+    pctx.filter = "none";
+    mapImageProcessed = processed;
+    invalidateDetailProjection();
+    scheduleDetailMapDraw();
+  };
+  mapImage.src = src;
+}
+
+function detailMapCanvasPosition(event, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const sx = event.clientX - rect.left;
+  const sy = event.clientY - rect.top;
+  return { sx, sy };
+}
+
+function ensureDetailMapCanvasSize() {
+  const canvas = $("detailMapCanvas");
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.round(rect.width * dpr));
+  const height = Math.max(1, Math.round(rect.height * dpr));
+  if (canvas.width === width && canvas.height === height) return;
+  canvas.width = width;
+  canvas.height = height;
+}
+
+function fitDetailMapView() {
+  const canvas = $("detailMapCanvas");
+  if (!mapImageLoaded || !mapImage || !canvas.clientWidth || !canvas.clientHeight) return;
+  const scale = Math.min(canvas.clientWidth / mapImage.width, canvas.clientHeight / mapImage.height) * 0.96;
+  detailMapView.scale = Math.max(0.05, scale);
+  detailMapView.tx = (canvas.clientWidth - mapImage.width * detailMapView.scale) * 0.5;
+  detailMapView.ty = (canvas.clientHeight - mapImage.height * detailMapView.scale) * 0.5;
+  detailMapView.initialized = true;
+}
+
+function detailScreenToImage(x, y) {
+  return {
+    x: (x - detailMapView.tx) / detailMapView.scale,
+    y: (y - detailMapView.ty) / detailMapView.scale,
+  };
+}
+
+function normalizedWorldForDetail(point) {
+  const fx = mapCalibration.worldFlipX ? -1 : 1;
+  const fz = mapCalibration.worldFlipZ ? -1 : 1;
+  return { x: Number(point.x) * fx, z: Number(point.z) * fz };
+}
+
+function solveLinearSystem(matrix, rhs) {
+  const n = rhs.length;
+  const a = matrix.map((row) => row.slice());
+  const b = rhs.slice();
+  for (let col = 0; col < n; col++) {
+    let pivot = col;
+    let best = Math.abs(a[col][col]);
+    for (let row = col + 1; row < n; row++) {
+      const score = Math.abs(a[row][col]);
+      if (score > best) {
+        best = score;
+        pivot = row;
+      }
+    }
+    if (best < 1e-10) return null;
+    if (pivot !== col) {
+      [a[col], a[pivot]] = [a[pivot], a[col]];
+      [b[col], b[pivot]] = [b[pivot], b[col]];
+    }
+    const inv = 1 / a[col][col];
+    for (let j = col; j < n; j++) a[col][j] *= inv;
+    b[col] *= inv;
+    for (let row = 0; row < n; row++) {
+      if (row === col) continue;
+      const factor = a[row][col];
+      if (Math.abs(factor) < 1e-12) continue;
+      for (let j = col; j < n; j++) a[row][j] -= factor * a[col][j];
+      b[row] -= factor * b[col];
+    }
+  }
+  return b;
+}
+
+function scoreDetailTransform(points, transform) {
+  let sqErr = 0;
+  for (const p of points) {
+    const pr = projectDetailPoint(p.world, transform);
+    const ex = p.pixel.x - pr.x;
+    const ey = p.pixel.y - pr.y;
+    sqErr += ex * ex + ey * ey;
+  }
+  return Math.sqrt(sqErr / Math.max(1, points.length));
+}
+
+function computeDetailMapTransform(points) {
+  const valid = (points || []).filter((p) =>
+    Number.isFinite(p?.world?.x) && Number.isFinite(p?.world?.z) &&
+    Number.isFinite(p?.pixel?.x) && Number.isFinite(p?.pixel?.y)
+  );
+  if (valid.length < 3) return null;
+
+  const ata = Array.from({ length: 6 }, () => Array(6).fill(0));
+  const atb = Array(6).fill(0);
+  for (const p of valid) {
+    const world = normalizedWorldForDetail(p.world);
+    const wx = world.x;
+    const wz = world.z;
+    const px = p.pixel.x;
+    const py = p.pixel.y;
+    const rowX = [wx, wz, 1, 0, 0, 0];
+    const rowY = [0, 0, 0, wx, wz, 1];
+    for (let i = 0; i < 6; i++) {
+      for (let j = 0; j < 6; j++) {
+        ata[i][j] += rowX[i] * rowX[j] + rowY[i] * rowY[j];
+      }
+      atb[i] += rowX[i] * px + rowY[i] * py;
+    }
+  }
+  const sol = solveLinearSystem(ata, atb);
+  if (!sol) return null;
+  const transform = { m00: sol[0], m01: sol[1], tx: sol[2], m10: sol[3], m11: sol[4], ty: sol[5] };
+  return {
+    ...transform,
+    error: scoreDetailTransform(valid, transform),
+    points: valid.length,
+    kind: "affine",
+  };
+}
+
+function projectDetailPoint(point, transform) {
+  const world = normalizedWorldForDetail(point);
+  return {
+    x: transform.m00 * world.x + transform.m01 * world.z + transform.tx,
+    y: transform.m10 * world.x + transform.m11 * world.z + transform.ty,
+    speed: Number(point.speed) || 0,
+    drift: Number(point.drift) || 0,
+    slip: Number(point.slip) || 0,
+    gLat: Number(point.gLat) || 0,
+    gLong: Number(point.gLong) || 0,
+    gTotal: Number(point.gTotal) || 0,
+  };
+}
+
+function ensureDetailProjection() {
+  if (!detailProjectionDirty) return;
+  const transform = computeDetailMapTransform(mapCalibration.points);
+  detailMapTransformCache = transform;
+  detailProjectedTrack = transform
+    ? (detailTrack || [])
+      .map((point) => projectDetailPoint(point, transform))
+      .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+    : [];
+  detailProjectionDirty = false;
+}
+
+function detailMapMetricValue(point) {
+  if (mapColorMode === "speed") return Math.max(0, point.speed || 0);
+  if (mapColorMode === "drift") return Math.abs(point.drift || 0);
+  if (mapColorMode === "slip") return Math.max(0, point.slip || 0);
+  if (mapColorMode === "gLat") return Math.abs(point.gLat || 0);
+  if (mapColorMode === "gTotal") return Math.max(0, point.gTotal || 0);
+  return 0;
+}
+
+function detailMapMetricRange(points) {
+  const values = points.map((p) => detailMapMetricValue(p)).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!values.length) return { min: 0, max: 1 };
+  if (mapColorMode === "speed") {
+    const min = quantile(values, 0.03);
+    const max = quantile(values, 0.97);
+    return max - min > 1e-6 ? { min, max } : { min: 0, max: Math.max(1, max) };
+  }
+  const max = quantile(values, 0.97);
+  return max > 1e-6 ? { min: 0, max } : { min: 0, max: 1 };
+}
+
+function detailMapColor(ratio) {
+  const t = clamp(ratio, 0, 1);
+  const eased = Math.pow(t, 0.85);
+  const hue = 240 - eased * 240;
+  return `hsl(${hue.toFixed(0)} 100% 55%)`;
+}
+
+function drawDetailMap(track) {
+  const canvas = $("detailMapCanvas");
+  const ctx = canvas.getContext("2d");
+  ensureDetailMapCanvasSize();
+  const dpr = window.devicePixelRatio || 1;
+  if (!detailMapView.initialized && mapImageLoaded && mapImage) {
+    fitDetailMapView();
+  }
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#070a0b";
+  ctx.fillRect(0, 0, w, h);
+
+  if (!mapImageLoaded || !mapImage) {
+    ctx.fillStyle = "#6b8a99"; ctx.font = "12px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("Loading map image...", w / 2, h / 2);
+    ctx.textAlign = "left";
+    setDetailMapHint("loading map image...");
+    return;
+  }
+
+  ensureDetailProjection();
+  const transform = detailMapTransformCache;
+
+  const scale = detailMapView.scale;
+  const ox = detailMapView.tx;
+  const oy = detailMapView.ty;
+
+  ctx.save();
+  ctx.translate(ox, oy);
+  ctx.scale(scale, scale);
+  ctx.drawImage(mapImageProcessed || mapImage, 0, 0);
+
+  const points = mapCalibration.points || [];
+  if (mapDebugMode) {
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i];
+      const x = p.pixel?.x;
+      const y = p.pixel?.y;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      const r = Math.max(4 / scale, 1.4);
+      ctx.strokeStyle = "#f3df4e";
+      ctx.lineWidth = Math.max(1.2 / scale, 0.6);
+      ctx.beginPath();
+      ctx.moveTo(x - r, y);
+      ctx.lineTo(x + r, y);
+      ctx.moveTo(x, y - r);
+      ctx.lineTo(x, y + r);
+      ctx.stroke();
+      ctx.fillStyle = "#f3df4e";
+      ctx.font = `${Math.max(10 / scale, 4)}px sans-serif`;
+      ctx.fillText(`${i + 1}`, x + r + 1, y - r - 1);
+    }
+  }
+
+  const projected = transform ? detailProjectedTrack : [];
+
+  if (transform && projected.length >= 2) {
+    const width = Math.max(3.6 / scale, 1.3);
+    if (mapColorMode === "plain") {
+      ctx.beginPath();
+      ctx.moveTo(projected[0].x, projected[0].y);
+      for (let i = 1; i < projected.length; i++) ctx.lineTo(projected[i].x, projected[i].y);
+      ctx.lineWidth = width;
+      ctx.strokeStyle = "#d84dff";
+      ctx.shadowColor = "rgba(216, 77, 255, 0.55)";
+      ctx.shadowBlur = 5 / scale;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(projected[0].x, projected[0].y);
+      for (let i = 1; i < projected.length; i++) ctx.lineTo(projected[i].x, projected[i].y);
+      ctx.lineWidth = width + (1.8 / scale);
+      ctx.strokeStyle = "rgba(0, 7, 10, 0.82)";
+      ctx.stroke();
+
+      const range = detailMapMetricRange(projected);
+      const buckets = 56;
+      const bucketOf = (point) => {
+        const ratio = (detailMapMetricValue(point) - range.min) / (range.max - range.min);
+        return clamp(Math.floor(clamp(ratio, 0, 1) * (buckets - 1)), 0, buckets - 1);
+      };
+      const strokeBucket = (bucket) => {
+        const ratio = bucket / (buckets - 1);
+        ctx.lineWidth = width;
+        ctx.strokeStyle = detailMapColor(ratio);
+        ctx.shadowColor = "rgba(255, 255, 255, 0.18)";
+        ctx.shadowBlur = 3.2 / scale;
+        ctx.stroke();
+      };
+      let current = bucketOf(projected[1]);
+      ctx.beginPath();
+      ctx.moveTo(projected[0].x, projected[0].y);
+      for (let i = 1; i < projected.length; i++) {
+        const prev = projected[i - 1];
+        const p = projected[i];
+        const bucket = bucketOf(p);
+        if (bucket !== current) {
+          strokeBucket(current);
+          ctx.beginPath();
+          ctx.moveTo(prev.x, prev.y);
+          current = bucket;
+        }
+        ctx.lineTo(p.x, p.y);
+      }
+      strokeBucket(current);
+      ctx.shadowBlur = 0;
+    }
+
+    ctx.fillStyle = "#26f06e";
+    ctx.beginPath();
+    ctx.arc(projected[0].x, projected[0].y, Math.max(3 / scale, 1.2), 0, Math.PI * 2);
+    ctx.fill();
+
+    const end = projected[projected.length - 1];
+    ctx.fillStyle = "#ff3658";
+    ctx.beginPath();
+    ctx.arc(end.x, end.y, Math.max(3 / scale, 1.2), 0, Math.PI * 2);
+    ctx.fill();
+  } else if (transform) {
+    ctx.fillStyle = "#6b8a99";
+    ctx.font = `${Math.max(11 / scale, 5)}px sans-serif`;
+    ctx.fillText("No track points", 8, 16);
+  }
+
+  ctx.restore();
+
+  if (!transform) {
+    setDetailMapHint("Need at least 3 calibration points for map alignment");
+  } else if (!track.length) {
+    setDetailMapHint("No track points in this session");
+  } else {
+    const src = detailTrackSrc || "unknown";
+    setDetailMapHint(`Track points: ${track.length} | Source: ${src} | Color: ${mapColorMode} | Calibration error: ${num(transform.error, 2)} px`);
+  }
+}
+
+function onDetailMapClick(event) {
+  if (!mapDebugMode || !mapPendingWorld) return;
+  const canvas = $("detailMapCanvas");
+  const { sx, sy } = detailMapCanvasPosition(event, canvas);
+  const imgPt = detailScreenToImage(sx, sy);
+  if (!Number.isFinite(imgPt.x) || !Number.isFinite(imgPt.y)) return;
+  mapCalibration.points.push({
+    world: { x: mapPendingWorld.x, z: mapPendingWorld.z },
+    pixel: { x: imgPt.x, y: imgPt.y },
+    label: `P${mapCalibration.points.length + 1}`,
+  });
+  mapPendingWorld = null;
+  renderPendingPoint();
+  updateCalibrationDerivedState();
+  scheduleDetailMapDraw();
+}
+
+function bindDetailMapInteraction() {
+  const canvas = $("detailMapCanvas");
+  const wrap = $("detailMapWrap");
+
+  const onWheelZoom = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!mapImageLoaded || !mapImage) return;
+    if (!detailMapView.initialized) fitDetailMapView();
+    const { sx, sy } = detailMapCanvasPosition(event, canvas);
+    const before = detailScreenToImage(sx, sy);
+    const delta = Math.max(-120, Math.min(120, event.deltaY));
+    const zoom = Math.exp(-delta * 0.0015);
+    detailMapView.scale = Math.max(0.05, Math.min(30, detailMapView.scale * zoom));
+    detailMapView.tx = sx - before.x * detailMapView.scale;
+    detailMapView.ty = sy - before.y * detailMapView.scale;
+    scheduleDetailMapDraw();
+  };
+
+  wrap.addEventListener("wheel", onWheelZoom, { passive: false });
+
+  canvas.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    detailMapView.pointer.down = true;
+    detailMapView.pointer.moved = false;
+    detailMapView.pointer.startX = event.clientX;
+    detailMapView.pointer.startY = event.clientY;
+    detailMapView.pointer.startTx = detailMapView.tx;
+    detailMapView.pointer.startTy = detailMapView.ty;
+    canvas.setPointerCapture(event.pointerId);
+    canvas.classList.add("dragging");
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (!detailMapView.pointer.down) return;
+    const dx = event.clientX - detailMapView.pointer.startX;
+    const dy = event.clientY - detailMapView.pointer.startY;
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+      detailMapView.pointer.moved = true;
+    }
+    detailMapView.tx = detailMapView.pointer.startTx + dx;
+    detailMapView.ty = detailMapView.pointer.startTy + dy;
+    scheduleDetailMapDraw();
+  });
+
+  canvas.addEventListener("pointerup", (event) => {
+    const wasMoved = detailMapView.pointer.moved;
+    detailMapView.pointer.down = false;
+    canvas.classList.remove("dragging");
+    if (!wasMoved) onDetailMapClick(event);
+  });
+
+  canvas.addEventListener("pointercancel", () => {
+    detailMapView.pointer.down = false;
+    canvas.classList.remove("dragging");
+  });
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 
 $("refreshBtn").addEventListener("click", refresh);
+const savedMapColor = localStorage.getItem(DETAIL_MAP_COLOR_KEY);
+if (DETAIL_MAP_COLOR_MODES.includes(savedMapColor)) {
+  mapColorMode = savedMapColor;
+}
+$("detailMapColorMode").value = mapColorMode;
+$("detailMapColorMode").addEventListener("change", (event) => {
+  const value = event.target.value;
+  if (!DETAIL_MAP_COLOR_MODES.includes(value)) return;
+  mapColorMode = value;
+  localStorage.setItem(DETAIL_MAP_COLOR_KEY, value);
+  scheduleDetailMapDraw();
+});
+bindDetailMapInteraction();
+$("detailMapZoomInBtn").addEventListener("click", () => {
+  if (!detailMapView.initialized) fitDetailMapView();
+  detailMapView.scale = Math.min(30, detailMapView.scale * 1.2);
+  scheduleDetailMapDraw();
+});
+$("detailMapZoomOutBtn").addEventListener("click", () => {
+  if (!detailMapView.initialized) fitDetailMapView();
+  detailMapView.scale = Math.max(0.05, detailMapView.scale * 0.82);
+  scheduleDetailMapDraw();
+});
+$("detailMapFitBtn").addEventListener("click", () => {
+  fitDetailMapView();
+  scheduleDetailMapDraw();
+});
+$("detailCaptureBtn").addEventListener("click", () => {
+  if (!mapDebugMode) return;
+  if (!mapLivePosition) {
+    setDetailMapHint("No live telemetry yet");
+    return;
+  }
+  if (mapLivePosition.source !== "raw") {
+    setDetailMapHint("Calibration capture is blocked until RAW world coordinates are available.");
+    return;
+  }
+  const isNearZero = Math.abs(mapLivePosition.x) + Math.abs(mapLivePosition.z) < 0.6;
+  const isStandingStill = mapLivePosition.speed < 0.5;
+  if (isNearZero && isStandingStill) {
+    setDetailMapHint("Drive a few meters first so map position is initialized.");
+    return;
+  }
+  mapPendingWorld = { x: mapLivePosition.x, z: mapLivePosition.z };
+  renderPendingPoint();
+  setDetailMapHint("Point captured. Click on the map image to place it.");
+});
+$("detailClearCalibrationBtn").addEventListener("click", () => {
+  mapCalibration.points = [];
+  mapPendingWorld = null;
+  renderPendingPoint();
+  updateCalibrationDerivedState();
+  scheduleDetailMapDraw();
+});
+$("detailFlipXBtn").addEventListener("click", () => {
+  mapCalibration.worldFlipX = !mapCalibration.worldFlipX;
+  refreshAxisButtons();
+  updateCalibrationDerivedState();
+  scheduleDetailMapDraw();
+});
+$("detailFlipZBtn").addEventListener("click", () => {
+  mapCalibration.worldFlipZ = !mapCalibration.worldFlipZ;
+  refreshAxisButtons();
+  updateCalibrationDerivedState();
+  scheduleDetailMapDraw();
+});
+$("detailSaveCalibrationBtn").addEventListener("click", saveDetailCalibration);
+window.addEventListener("resize", () => {
+  detailMapView.initialized = false;
+  if (selectedCar && currentCar) {
+    if (activeCarChart === "power") drawCarPowerCurve(carPowerPoints);
+    else drawCarChart(currentCar);
+  } else if (selectedSession) {
+    drawSessionChart(detailSamples);
+  }
+  scheduleDetailMapDraw();
+});
+window.addEventListener("beforeunload", () => {
+  stopMapLiveStream();
+});
+toggleCalibrationPane();
+renderPendingPoint();
+updateCalibrationDerivedState();
 refresh();

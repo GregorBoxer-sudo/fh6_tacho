@@ -4,6 +4,22 @@ A real-time tachometer overlay for Forza Horizon 6 — with a shift light that a
 
 ![Dashboard](docs/dashboard.png)
 
+![Analytics](docs/analysis.png)
+
+## Agenda
+
+- [What is this?](#what-is-this)
+- [Quick start](#quick-start--just-want-to-play)
+- [Dashboard field reference](#dashboard-field-reference)
+- [How the shift light works](#how-the-shift-light-works)
+- [Command-line options](#command-line-options)
+- [Data storage](#data-storage)
+- [Session Map + Calibration](#session-map--calibration)
+- [Analytics](#analytics)
+- [Building from source](#building-from-source)
+- [Technical deep-dive](#technical-deep-dive-the-shift-algorithm)
+- [Releases](#releases)
+
 ---
 
 ## What is this?
@@ -72,7 +88,105 @@ Right-click the overlay to close it.
 
 ---
 
+## Dashboard field reference
+
+<details>
+<summary>Open dashboard field legend</summary>
+
+The web dashboard (and the launcher's **Help & field legend** section) shows the following fields.
+
+### Main displays
+
+| Field | What it means |
+|---|---|
+| **RPM** | Engine revolutions per minute. |
+| **Speed** | Vehicle speed in km/h. |
+| **Gear** | Current gear. 0 = neutral, negative = reverse. |
+| **Power** | Estimated wheel power output at the current RPM (hp). |
+| **Torque** | Engine torque at the current RPM (Nm). |
+| **Boost** | Turbo / supercharger boost pressure. |
+| **Lap / Time / Best** | Lap number, elapsed lap time, and fastest completed lap this session. |
+| **Pos** | Race position — only populated in structured events. |
+
+### Control strip (right side)
+
+| Label | Full name | What it shows |
+|---|---|---|
+| **GAS** | Throttle | Accelerator pedal, 0–100 %. |
+| **BRK** | Brake | Brake pedal, 0–100 %. |
+| **STR** | Steering | Steering wheel position, −1.0 (full left) to +1.0 (full right). |
+| **DLT** | Lap delta | Time gap to your best lap. Green = currently faster, red = slower. |
+| **PROG** | Lap progress | How far through the current lap you are, as a percentage. |
+
+### Data strip
+
+| Label | Full name | What it shows |
+|---|---|---|
+| **LAT** | Lateral G | Left/right cornering load in G. |
+| **LON** | Longitudinal G | Acceleration / braking load in G. |
+| **DRV** | Drivetrain | FWD, RWD, or AWD. |
+| **FUEL** | Fuel level | Percentage (≤ 100 %) or litres when > 1.2. |
+
+### G-force meter
+
+The dot on the G-meter moves in two dimensions — left/right for lateral load, up/down for longitudinal.  
+The `p` suffix (e.g. `1.23p`) is the **peak** value recorded since you started driving.
+
+### Drift display
+
+| Element | What it shows |
+|---|---|
+| Angle (deg) | Estimated side-slip angle in degrees. |
+| Sliding bar | Live slip angle visualised as a needle. |
+| `Np` number | **Peak** drift angle seen this session. |
+
+### Tyre corners (FL / FR / RL / RR)
+
+**FL** = Front Left, **FR** = Front Right, **RL** = Rear Left, **RR** = Rear Right.
+
+- **Temperature box** — tyre surface temperature in °C. Colour shifts from blue (cold) through green (optimal) to red/white (overheating).
+- **Slip LED strip** (5 dots per corner, shown around the edge of the display) — how hard that tyre is working. Fills from 0 to full as combined slip increases. All dots lit = significant wheelspin or lockup.
+
+### Warning indicators
+
+Eight labels light up around the shift LEDs when certain conditions are met:
+
+| Label | Full name | When it lights up |
+|---|---|---|
+| **US** | Understeer | Front tyres losing grip more than rears while you are steering. The car is pushing wide. |
+| **OS** | Oversteer | Rear tyres losing grip more than fronts while you are steering. The rear is stepping out. |
+| **B/T** | Brake/Throttle overlap | You are pressing both the brake and the throttle at the same time (both > 8 %). |
+| **TMP** | Tyre temperature | At least one tyre has exceeded 105 °C — grip noticeably degrades above this point. |
+| **ABS** | ABS active | Anti-lock braking system is intervening (hard braking with front slip detected). |
+| **LOCK** | Wheel lock | A front wheel has locked up under hard braking. |
+| **CL** | Clutch | The clutch pedal is pressed (> 8 %). |
+| **HB** | Handbrake | The handbrake is on (> 8 %). |
+
+### Shift LED colours
+
+| Colour | Meaning |
+|---|---|
+| 🟢 Green (LEDs 1–4) | RPM building — shift point not yet near. |
+| 🟡 Yellow (LEDs 5–8) | Approaching the shift point. |
+| 🔴 Red (LEDs 9–11) | Getting close — prepare to shift. |
+| 🟣 Purple (LEDs 12–14) + flash | **Shift NOW.** All LEDs flash rapidly until you upshift. |
+
+### Other
+
+| Label | What it means |
+|---|---|
+| **Ordinal** | Forza's internal car identifier. Unique per model variant, used to key stored curve data. |
+| **PI** | Performance Index — the car's class rating (100–999, e.g. 900 = X class). |
+| **Shift point** | The RPM the shift indicator is targeting for this car. Learned from your driving; see *How the shift light works* below. |
+
+</details>
+
+---
+
 ## How the shift light works
+
+<details>
+<summary>Open shift-light overview</summary>
 
 The indicator goes through several stages as you drive more.
 
@@ -92,9 +206,14 @@ Lead time is compensated dynamically so the light fires early enough for you to 
 
 All data is saved per car, so the second time you drive the same vehicle everything is already there.
 
+</details>
+
 ---
 
 ## Command-line options
+
+<details>
+<summary>Open CLI reference</summary>
 
 These are all optional — the defaults work out of the box.
 
@@ -107,6 +226,7 @@ Options:
   --udp-host <HOST>            Address for Forza UDP packets [default: 0.0.0.0]
   --udp-port <PORT>            UDP port [default: 5300]
   --demo                       Run a simulated car (no Forza needed)
+  --debug                      Enable debug-only analytics map calibration tools
   --no-gui                     Terminal-only mode, no window
   --inspect                    Log raw UDP packets to disk
   --inspect-dir <DIR>          Directory for packet logs [default: logs]
@@ -118,9 +238,14 @@ Options:
   -h, --help                   Print help
 ```
 
+</details>
+
 ---
 
 ## Data storage
+
+<details>
+<summary>Open data layout</summary>
 
 Everything is written next to the executable:
 
@@ -129,14 +254,55 @@ forza-tacho(.exe)
 data/
   power_curves.json     <- learned shift points, one entry per car
   drive_sessions/       <- one .jsonl file per session
+  map_calibration.json  <- map calibration points for world->image alignment
 logs/                   <- only created with --inspect or --shift-cache-log
 ```
 
 Deleting `data/` resets all learned shift data.
 
+</details>
+
+## Session Map + Calibration
+
+<details>
+<summary>Open map and calibration workflow</summary>
+
+- Open analytics at `http://<host>:8765/analytics.html` and select a session.
+- There is no separate map tab anymore; map features are integrated into analytics (`/map.html` redirects to `/analytics.html`).
+- Session tracks are drawn from recorded world positions in `drive_sessions`.
+- Track coloring modes are available: `Plain`, `Speed`, `Drift`, `Slip`, `G Lat`, `G Total`.
+- Start the app with `--debug` to enable calibration tools inside analytics.
+- In calibration mode you can:
+  - capture your current car world position,
+  - click the matching point on the map image,
+  - repeat with multiple points,
+  - save calibration to `data/map_calibration.json`.
+- The analytics map supports pan + zoom (`wheel`, `+`, `-`, `Fit`) for precise point placement.
+- Calibration supports `Flip X` / `Flip Z` toggles for mirrored axis cases.
+
+</details>
+
+## Analytics
+
+<details>
+<summary>Open analytics feature list</summary>
+
+- Session detail now includes the map directly under the charts (`/analytics.html`).
+- Map coloring supports: `Plain`, `Speed`, `Drift`, `Slip`, `G Lat`, `G Total`.
+- Analytics includes the full map workflow (track view + calibration in debug mode).
+- Track line width is rendered with constant on-screen pixel thickness while zooming.
+- Analytics layout uses slimmer side panes, a wider center pane, and a taller map canvas for better large-screen usability.
+- Session stats now include:
+  - `Pure Lat G` (lateral peak while longitudinal/brake/accel influence is low)
+
+</details>
+
 ---
 
 ## Overlay on KDE Wayland
+
+<details>
+<summary>Open KDE Wayland setup</summary>
 
 On KDE Wayland the compositor ignores the app-level "always on top" flag by default.  
 Fix it with a window rule:
@@ -147,9 +313,14 @@ Fix it with a window rule:
 4. Add property: **Virtual Desktop** → Force → All Desktops
 5. **Apply** — takes effect immediately, no restart needed
 
+</details>
+
 ---
 
 ## Performance
+
+<details>
+<summary>Open performance notes</summary>
 
 Forza streams telemetry at 60 packets/second (~324 bytes each).
 
@@ -161,6 +332,8 @@ Forza streams telemetry at 60 packets/second (~324 bytes each).
 | External dependencies at runtime | **Zero** — single binary |
 
 Disk writes happen only when the power curve is updated (~every 0.3 s during learning, idle otherwise). Saves are atomic (write to `.tmp`, then rename) so a crash never corrupts stored data.
+
+</details>
 
 ---
 
@@ -181,6 +354,9 @@ The workflow (`.github/workflows/release.yml`) builds both targets in parallel a
 ---
 
 ## Building from source
+
+<details>
+<summary>Open build instructions</summary>
 
 You need [Rust](https://rustup.rs/) installed.
 
@@ -220,6 +396,8 @@ cargo build --release --target x86_64-pc-windows-gnu
 ```
 
 The `.exe` is fully self-contained — no extra files needed alongside it.
+
+</details>
 
 ---
 

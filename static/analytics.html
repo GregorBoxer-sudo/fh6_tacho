@@ -10,7 +10,7 @@
   </head>
   <body class="analyticsBody">
     <header class="analyticsTop">
-      <a class="topLink" href="/">Back</a>
+      <a class="analyticsNav" href="/">Dashboard</a>
       <strong>Analytics</strong>
       <button id="refreshBtn" type="button">Refresh</button>
     </header>
@@ -33,6 +33,10 @@
           <span>Max G</span>
           <strong id="topG">0.00g</strong>
         </div>
+        <div>
+          <span>Pure Lat G</span>
+          <strong id="topPureLatG">0.00g</strong>
+        </div>
       </section>
 
       <section class="analyticsGrid">
@@ -53,6 +57,56 @@
             <button class="chartTab" data-chart="power">Power &amp; Torque</button>
           </div>
           <canvas id="sessionChart" width="900" height="280"></canvas>
+          <section id="detailMapSection" class="detailMapSection">
+            <div class="mapToolsRow">
+              <strong>Session Map</strong>
+              <div class="mapToolGroup">
+                <select id="detailMapColorMode">
+                  <option value="plain">Color: Plain</option>
+                  <option value="speed">Color: Speed</option>
+                  <option value="drift">Color: Drift</option>
+                  <option value="slip">Color: Slip</option>
+                  <option value="gLat">Color: G Lat</option>
+                  <option value="gTotal">Color: G Total</option>
+                </select>
+                <button id="detailMapZoomInBtn" type="button">+</button>
+                <button id="detailMapZoomOutBtn" type="button">-</button>
+                <button id="detailMapFitBtn" type="button">Fit</button>
+              </div>
+            </div>
+            <div class="detailMapWrap" id="detailMapWrap">
+              <canvas id="detailMapCanvas" width="900" height="360"></canvas>
+              <div id="detailMapHint" class="detailMapHint"></div>
+            </div>
+            <section id="detailCalibrationPane" class="detailCalibrationPane" hidden>
+              <div class="calGrid">
+                <div class="liveBox">
+                  <strong>Live Car Position</strong>
+                  <span id="detailLivePosition">no telemetry</span>
+                  <button id="detailCaptureBtn" type="button">Capture Current Car Point</button>
+                </div>
+                <div class="liveBox">
+                  <strong>Pending Point</strong>
+                  <span id="detailPendingPoint">none</span>
+                  <small>After capture: click on map to place the pixel point.</small>
+                </div>
+                <div id="detailCalibrationInfo" class="liveBox"></div>
+                <div class="liveBox">
+                  <strong>World Axis</strong>
+                  <div class="flipRow">
+                    <button id="detailFlipXBtn" type="button">Flip X</button>
+                    <button id="detailFlipZBtn" type="button">Flip Z</button>
+                  </div>
+                  <small>Use this if the path is mirrored/inside-out.</small>
+                </div>
+              </div>
+              <div class="calButtons">
+                <button id="detailSaveCalibrationBtn" type="button">Save Calibration</button>
+                <button id="detailClearCalibrationBtn" type="button">Clear Points</button>
+              </div>
+              <div id="detailPointList" class="pointList"></div>
+            </section>
+          </section>
           <div id="lapInfo" class="infoStrip"></div>
         </section>
 

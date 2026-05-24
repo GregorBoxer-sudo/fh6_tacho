@@ -3,6 +3,7 @@ use std::{
     fs,
     net::{Ipv4Addr, UdpSocket as StdUdpSocket},
     path::Path,
+    sync::{Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -104,6 +105,16 @@ pub(crate) fn round_to(value: f64, step: f64) -> f64 {
 
 pub(crate) fn clamp(value: f64, low: f64, high: f64) -> f64 {
     value.max(low).min(high)
+}
+
+/// Acquire `m`, recovering from poison rather than panicking.
+///
+/// If a thread panicked while holding the lock the data may be partially
+/// modified, but crashing every subsequent caller is worse.  For our
+/// append-only JSON maps the recovered state is always safe to read/write.
+#[allow(dead_code)]
+pub(crate) fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub(crate) fn now_seconds() -> f64 {

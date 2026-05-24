@@ -59,6 +59,12 @@ body {
   padding-left: 8px;
 }
 
+.statusNav {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
 .topLink {
   display: inline-grid;
   place-items: center;
@@ -70,7 +76,6 @@ body {
   color: #bfefff;
   text-decoration: none;
   line-height: 1;
-  margin-left: auto;
 }
 
 .status {

@@ -264,7 +264,7 @@ function updateWarnings(data) {
 
   els.understeerWarn.classList.toggle("active", understeer);
   els.oversteerWarn.classList.toggle("active", oversteer);
-  els.tempWarn.classList.toggle("active", hottestTire >= 200);
+  els.tempWarn.classList.toggle("active", hottestTire >= 105); // °C — grip degrades above ~105 °C
   els.overlapWarn.classList.toggle("active", overlap);
   els.absWarn.classList.toggle("active", absActive);
   els.brakeLockWarn.classList.toggle("active", brakeLock);
