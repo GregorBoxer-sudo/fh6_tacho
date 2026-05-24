@@ -12,8 +12,42 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # ── Test gate ────────────────────────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libegl-dev \
+            libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Dependency security audit
+        run: cargo audit
+
+      - name: Rust tests
+        run: cargo test
+
+      - name: Frontend syntax checks
+        run: |
+          node --check static/app.js
+          node --check static/analytics.js
+          node --check static/sw.js
+
   # ── Linux (Ubuntu 22.04 for broad glibc compatibility) ──────────────────────
   build-linux:
+    needs: test
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +77,11 @@ jobs:
 
   # ── Windows (native runner) ──────────────────────────────────────────────────
   build-windows:
+    needs: test
     runs-on: windows-latest
+    env:
+      WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -52,6 +90,44 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Decode Windows signing certificate
+        if: ${{ env.WINDOWS_CERT_PFX_BASE64 != '' && env.WINDOWS_CERT_PASSWORD != '' }}
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes(
+            "windows-signing-cert.pfx",
+            [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64)
+          )
+
+      - name: Sign Windows binary
+        if: ${{ env.WINDOWS_CERT_PFX_BASE64 != '' && env.WINDOWS_CERT_PASSWORD != '' }}
+        shell: pwsh
+        run: |
+          $signtoolPath = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+          if (-not $signtoolPath) {
+            $signtoolPath = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1).FullName
+          }
+          if (-not $signtoolPath) {
+            throw "signtool.exe not found"
+          }
+          & $signtoolPath sign `
+            /f windows-signing-cert.pfx `
+            /p "$env:WINDOWS_CERT_PASSWORD" `
+            /fd SHA256 `
+            /tr http://timestamp.digicert.com `
+            /td SHA256 `
+            target/release/forza-tacho.exe
+
+      - name: Remove signing certificate
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          if (Test-Path windows-signing-cert.pfx) {
+            Remove-Item windows-signing-cert.pfx -Force
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -59,6 +135,7 @@ jobs:
 
   # ── macOS universal binary (Intel + Apple Silicon) ───────────────────────────
   build-macos:
+    needs: test
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,6 +186,15 @@ jobs:
           name: macos
           path: artifacts
 
+      - name: Generate SHA-256 checksums
+        run: |
+          cd artifacts
+          sha256sum \
+            forza-tacho-linux-x86_64 \
+            forza-tacho.exe \
+            forza-tacho-macos \
+            > SHA256SUMS.txt
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -117,3 +203,4 @@ jobs:
             artifacts/forza-tacho-linux-x86_64
             artifacts/forza-tacho.exe
             artifacts/forza-tacho-macos
+            artifacts/SHA256SUMS.txt

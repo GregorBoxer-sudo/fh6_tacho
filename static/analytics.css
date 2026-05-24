@@ -203,6 +203,40 @@
   background: #070a0b;
 }
 
+.replayControls {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 0;
+}
+
+.replayControls[hidden] {
+  display: none;
+}
+
+.replayControls button,
+.replayControls select {
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #10181b;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.replayControls input {
+  width: 100%;
+}
+
+.replayControls span {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .detailMapSection {
   margin: 10px 10px 0;
   border: 1px solid rgba(255,255,255,.08);

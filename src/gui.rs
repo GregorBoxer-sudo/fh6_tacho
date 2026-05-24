@@ -1,6 +1,7 @@
 use eframe::egui::{self, Color32, RichText, ScrollArea};
 use std::{
     net::Ipv4Addr,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -8,7 +9,11 @@ use std::{
     time::Duration,
 };
 
-use crate::{config::Args, telemetry::TelemetryHub, util::lan_addresses};
+use crate::{
+    config::{Args, LauncherConfig},
+    telemetry::TelemetryHub,
+    util::lan_addresses,
+};
 
 // ── LED colour scheme (mirrors static/style.css) ─────────────────────────────
 
@@ -19,10 +24,10 @@ const NUM_LEDS: usize = 14;
 /// Groups:  0-3 green | 4-7 yellow | 8-10 red | 11-13 purple
 fn led_rgb(i: usize) -> (u8, u8, u8) {
     match i {
-        0..=3  => (0x26, 0xf0, 0x6e), // #26f06e
-        4..=7  => (0xf3, 0xdf, 0x4e), // #f3df4e
+        0..=3 => (0x26, 0xf0, 0x6e),  // #26f06e
+        4..=7 => (0xf3, 0xdf, 0x4e),  // #f3df4e
         8..=10 => (0xff, 0x36, 0x58), // #ff3658
-        _      => (0xd8, 0x46, 0xff), // #d846ff
+        _ => (0xd8, 0x46, 0xff),      // #d846ff
     }
 }
 
@@ -80,7 +85,12 @@ fn compute_led_state(
     flash_active: &mut bool,
     flash_gear: &mut i64,
 ) -> LedState {
-    let off = LedState { active: 0, flash: false, flash_on: false, race_on: false };
+    let off = LedState {
+        active: 0,
+        flash: false,
+        flash_on: false,
+        race_on: false,
+    };
 
     let Some(tel) = telemetry else { return off };
     if !tel["raceOn"].as_bool().unwrap_or(false) {
@@ -88,12 +98,12 @@ fn compute_led_state(
         return off;
     }
 
-    let engine     = &tel["engine"];
-    let rpm        = fv(&engine["rpm"]);
-    let idle       = fv(&engine["idleRpm"]).max(0.0);
-    let shift_now  = fv(&engine["shiftNowRpm"]);
-    let redline    = fv(&engine["redlineRpm"]);
-    let gear       = tel["controls"]["gear"].as_i64().unwrap_or(0);
+    let engine = &tel["engine"];
+    let rpm = fv(&engine["rpm"]);
+    let idle = fv(&engine["idleRpm"]).max(0.0);
+    let shift_now = fv(&engine["shiftNowRpm"]);
+    let redline = fv(&engine["redlineRpm"]);
+    let gear = tel["controls"]["gear"].as_i64().unwrap_or(0);
 
     // Reset flash when the driver changes gear (mirrors app.js shiftFlashState)
     if gear != *flash_gear {
@@ -110,7 +120,11 @@ fn compute_led_state(
     }
 
     // LEDs fill up to 97 % of shiftNowRpm (brief "all on, not blinking" state)
-    let led_full = if shift_now > idle + 1000.0 { shift_now * 0.97 } else { 0.0 };
+    let led_full = if shift_now > idle + 1000.0 {
+        shift_now * 0.97
+    } else {
+        0.0
+    };
     let led_ratio = if led_full > 0.0 {
         clampf(rpm / led_full, 0.0, 1.0)
     } else if redline > 0.0 {
@@ -119,19 +133,24 @@ fn compute_led_state(
         0.0
     };
 
-    let active   = (led_ratio * NUM_LEDS as f64).round() as usize;
+    let active = (led_ratio * NUM_LEDS as f64).round() as usize;
     // 80 ms flash period: Math.floor(now_ms / 80) % 2
     let flash_on = *flash_active && ((time * 1000.0 / 80.0) as i64 % 2 == 0);
 
-    LedState { active, flash: *flash_active, flash_on, race_on: true }
+    LedState {
+        active,
+        flash: *flash_active,
+        flash_on,
+        race_on: true,
+    }
 }
 
 // ── LED painter ───────────────────────────────────────────────────────────────
 
 fn paint_leds(painter: &egui::Painter, rect: egui::Rect, state: &LedState) {
     let padding = 6.0_f32;
-    let gap     = 4.0_f32;
-    let avail_w = rect.width()  - 2.0 * padding;
+    let gap = 4.0_f32;
+    let avail_w = rect.width() - 2.0 * padding;
     let avail_h = rect.height() - 2.0 * padding;
 
     // Radius: fit NUM_LEDS circles with gaps into available width, but also
@@ -141,31 +160,41 @@ fn paint_leds(painter: &egui::Painter, rect: egui::Rect, state: &LedState) {
         .max(3.0);
 
     let diameter = r * 2.0;
-    let total_w  = NUM_LEDS as f32 * diameter + (NUM_LEDS as f32 - 1.0) * gap;
-    let start_x  = rect.center().x - total_w / 2.0 + r;
-    let cy       = rect.center().y;
+    let total_w = NUM_LEDS as f32 * diameter + (NUM_LEDS as f32 - 1.0) * gap;
+    let start_x = rect.center().x - total_w / 2.0 + r;
+    let cy = rect.center().y;
 
     for i in 0..NUM_LEDS {
-        let cx     = start_x + i as f32 * (diameter + gap);
+        let cx = start_x + i as f32 * (diameter + gap);
         let center = egui::pos2(cx, cy);
 
-        let bright = if state.flash { state.flash_on } else { i < state.active };
+        let bright = if state.flash {
+            state.flash_on
+        } else {
+            i < state.active
+        };
 
         // Glow rings behind active LEDs
         if bright {
             let (rr, gg, bb) = led_rgb(i);
             painter.circle_filled(
-                center, r + 7.0,
+                center,
+                r + 7.0,
                 Color32::from_rgba_unmultiplied(rr, gg, bb, 18),
             );
             painter.circle_filled(
-                center, r + 3.5,
+                center,
+                r + 3.5,
                 Color32::from_rgba_unmultiplied(rr, gg, bb, 40),
             );
         }
 
         let color = if state.flash {
-            if state.flash_on { led_flash_on(i) } else { led_flash_off() }
+            if state.flash_on {
+                led_flash_on(i)
+            } else {
+                led_flash_off()
+            }
         } else if i < state.active {
             led_active(i)
         } else {
@@ -178,14 +207,14 @@ fn paint_leds(painter: &egui::Painter, rect: egui::Rect, state: &LedState) {
 
 // ── Overlay viewport UI ───────────────────────────────────────────────────────
 
-fn overlay_ui(
-    ctx:          &egui::Context,
-    state:        &LedState,
-    close_signal: &Arc<AtomicBool>,
-) {
+fn overlay_ui(ctx: &egui::Context, state: &LedState, close_signal: &Arc<AtomicBool>) {
     // Repaint fast during racing so the LEDs track 60 Hz telemetry.
     ctx.request_repaint_after(if state.race_on {
-        if state.flash { Duration::from_millis(40) } else { Duration::from_millis(16) }
+        if state.flash {
+            Duration::from_millis(40)
+        } else {
+            Duration::from_millis(16)
+        }
     } else {
         Duration::from_millis(500)
     });
@@ -248,14 +277,22 @@ fn help_ui(ui: &mut egui::Ui) {
                 ui.label(RichText::new(desc).small().weak());
                 ui.end_row();
             };
-            row(ui, "RPM",         "Engine revolutions per minute.");
-            row(ui, "Speed",       "Vehicle speed in km/h.");
-            row(ui, "Gear",        "Current gear. 0 = neutral, negative = reverse.");
-            row(ui, "Power",       "Estimated wheel power at the current RPM (hp).");
-            row(ui, "Torque",      "Engine torque at the current RPM (Nm).");
-            row(ui, "Boost",       "Turbo / supercharger boost pressure.");
-            row(ui, "Lap / Best",  "Lap number, current lap time, and fastest lap this session.");
-            row(ui, "Pos",         "Race position — only in structured events.");
+            row(ui, "RPM", "Engine revolutions per minute.");
+            row(ui, "Speed", "Vehicle speed in km/h.");
+            row(ui, "Gear", "Current gear. 0 = neutral, negative = reverse.");
+            row(
+                ui,
+                "Power",
+                "Estimated wheel power at the current RPM (hp).",
+            );
+            row(ui, "Torque", "Engine torque at the current RPM (Nm).");
+            row(ui, "Boost", "Turbo / supercharger boost pressure.");
+            row(
+                ui,
+                "Lap / Best",
+                "Lap number, current lap time, and fastest lap this session.",
+            );
+            row(ui, "Pos", "Race position — only in structured events.");
         });
 
     ui.add_space(8.0);
@@ -279,11 +316,26 @@ fn help_ui(ui: &mut egui::Ui) {
                 ui.label(RichText::new(desc).small().weak());
                 ui.end_row();
             };
-            row(ui, "GAS",  "(Throttle)",    "Accelerator pedal, 0–100 %.");
-            row(ui, "BRK",  "(Brake)",       "Brake pedal, 0–100 %.");
-            row(ui, "STR",  "(Steering)",    "Wheel position: -1.0 = full left, +1.0 = full right.");
-            row(ui, "DLT",  "(Lap delta)",   "Time gap to your best lap. Green = faster, red = slower.");
-            row(ui, "PROG", "(Lap progress)","How far through the current lap, as a percentage.");
+            row(ui, "GAS", "(Throttle)", "Accelerator pedal, 0–100 %.");
+            row(ui, "BRK", "(Brake)", "Brake pedal, 0–100 %.");
+            row(
+                ui,
+                "STR",
+                "(Steering)",
+                "Wheel position: -1.0 = full left, +1.0 = full right.",
+            );
+            row(
+                ui,
+                "DLT",
+                "(Lap delta)",
+                "Time gap to your best lap. Green = faster, red = slower.",
+            );
+            row(
+                ui,
+                "PROG",
+                "(Lap progress)",
+                "How far through the current lap, as a percentage.",
+            );
         });
 
     ui.add_space(8.0);
@@ -307,10 +359,20 @@ fn help_ui(ui: &mut egui::Ui) {
                 ui.label(RichText::new(desc).small().weak());
                 ui.end_row();
             };
-            row(ui, "LAT",  "(Lateral G)",      "Left/right cornering load in G.");
-            row(ui, "LON",  "(Longitudinal G)",  "Acceleration / braking load in G.");
-            row(ui, "DRV",  "(Drivetrain)",      "FWD, RWD, or AWD.");
-            row(ui, "FUEL", "(Fuel level)",      "Percentage (<=100 %) or litres when > 1.2.");
+            row(ui, "LAT", "(Lateral G)", "Left/right cornering load in G.");
+            row(
+                ui,
+                "LON",
+                "(Longitudinal G)",
+                "Acceleration / braking load in G.",
+            );
+            row(ui, "DRV", "(Drivetrain)", "FWD, RWD, or AWD.");
+            row(
+                ui,
+                "FUEL",
+                "(Fuel level)",
+                "Percentage (<=100 %) or litres when > 1.2.",
+            );
         });
 
     ui.add_space(8.0);
@@ -318,18 +380,27 @@ fn help_ui(ui: &mut egui::Ui) {
     ui.add_space(6.0);
 
     // ── G-force meter & drift ─────────────────────────────────────────────
-    ui.label(RichText::new("G-force meter and drift display").strong().small());
+    ui.label(
+        RichText::new("G-force meter and drift display")
+            .strong()
+            .small(),
+    );
     ui.add_space(3.0);
 
     let notes: &[(&str, &str)] = &[
-        ("G-meter dot",
-         "Moves in two dimensions: left/right = lateral load, up/down = longitudinal load."),
-        ("Np suffix (e.g. 1.23p)",
-         "Peak value recorded since you started driving this session."),
-        ("Drift angle",
-         "Estimated side-slip angle in degrees. The sliding bar visualises the live angle."),
-        ("Drift Np",
-         "Peak drift angle seen this session."),
+        (
+            "G-meter dot",
+            "Moves in two dimensions: left/right = lateral load, up/down = longitudinal load.",
+        ),
+        (
+            "Np suffix (e.g. 1.23p)",
+            "Peak value recorded since you started driving this session.",
+        ),
+        (
+            "Drift angle",
+            "Estimated side-slip angle in degrees. The sliding bar visualises the live angle.",
+        ),
+        ("Drift Np", "Peak drift angle seen this session."),
     ];
     for (title, body) in notes {
         ui.label(RichText::new(*title).small().strong());
@@ -342,7 +413,11 @@ fn help_ui(ui: &mut egui::Ui) {
     ui.add_space(6.0);
 
     // ── Tyre corners ──────────────────────────────────────────────────────
-    ui.label(RichText::new("Tyre corners  FL / FR / RL / RR").strong().small());
+    ui.label(
+        RichText::new("Tyre corners  FL / FR / RL / RR")
+            .strong()
+            .small(),
+    );
     ui.add_space(3.0);
     ui.label(RichText::new(
         "FL = Front Left, FR = Front Right, RL = Rear Left, RR = Rear Right.\n\
@@ -372,14 +447,44 @@ fn help_ui(ui: &mut egui::Ui) {
                 ui.label(RichText::new(desc).small().weak());
                 ui.end_row();
             };
-            row(ui, "US",   "(Understeer)",    "Front tyres losing grip more than rears while steering — car pushes wide.");
-            row(ui, "OS",   "(Oversteer)",     "Rear tyres losing grip more than fronts while steering — rear steps out.");
-            row(ui, "B/T",  "(Brake/Throttle)","Both brake and throttle pressed at the same time (both > 8 %).");
-            row(ui, "TMP",  "(Temperature)",   "At least one tyre has exceeded 105 °C (grip noticeably degrades above this).");
-            row(ui, "ABS",  "(ABS active)",    "Anti-lock braking system is intervening under hard braking.");
-            row(ui, "LOCK", "(Wheel lock)",    "A front wheel has locked up under hard braking.");
-            row(ui, "CL",   "(Clutch)",        "Clutch pedal is pressed (> 8 %).");
-            row(ui, "HB",   "(Handbrake)",     "Handbrake is on (> 8 %).");
+            row(
+                ui,
+                "US",
+                "(Understeer)",
+                "Front tyres losing grip more than rears while steering — car pushes wide.",
+            );
+            row(
+                ui,
+                "OS",
+                "(Oversteer)",
+                "Rear tyres losing grip more than fronts while steering — rear steps out.",
+            );
+            row(
+                ui,
+                "B/T",
+                "(Brake/Throttle)",
+                "Both brake and throttle pressed at the same time (both > 8 %).",
+            );
+            row(
+                ui,
+                "TMP",
+                "(Temperature)",
+                "At least one tyre has exceeded 105 °C (grip noticeably degrades above this).",
+            );
+            row(
+                ui,
+                "ABS",
+                "(ABS active)",
+                "Anti-lock braking system is intervening under hard braking.",
+            );
+            row(
+                ui,
+                "LOCK",
+                "(Wheel lock)",
+                "A front wheel has locked up under hard braking.",
+            );
+            row(ui, "CL", "(Clutch)", "Clutch pedal is pressed (> 8 %).");
+            row(ui, "HB", "(Handbrake)", "Handbrake is on (> 8 %).");
         });
 
     ui.add_space(8.0);
@@ -387,28 +492,44 @@ fn help_ui(ui: &mut egui::Ui) {
     ui.add_space(6.0);
 
     // ── Shift indicator stages ────────────────────────────────────────────
-    ui.label(RichText::new("Shift indicator — learning stages").strong().small());
+    ui.label(
+        RichText::new("Shift indicator — learning stages")
+            .strong()
+            .small(),
+    );
     ui.add_space(3.0);
 
     let stages: &[(&str, &str)] = &[
-        ("Stage 1 — No data yet",
-         "Uses a conservative estimate: shifts at ~94 % of Forza's reported max RPM, \
-          leaning early to avoid hitting the limiter."),
-        ("Stage 2 — Rev limit observed",
-         "After a few laps the app locks in the actual RPM ceiling it has seen and \
-          tightens the warning accordingly."),
-        ("Stage 3 — Limiter bounce detected",
-         "If you hold full throttle at the limiter the characteristic RPM oscillation \
-          is detected and the exact limit is confirmed."),
-        ("Stage 4-5 — Power curve + gear ratios",
-         "Full-throttle runs build a per-car power curve (100 RPM buckets). \
-          Gear drop ratios are measured from your actual upshifts."),
-        ("Stage 6 — Optimal shift point",
-         "The app finds the RPM where power after an upshift exceeds current power \
-          (>0.5 % threshold). That becomes the shift target."),
-        ("Stage 7 — Dynamic warning",
-         "The light fires early: warning_rpm = shift_rpm - clamp(rpm_rate x 0.20s, 100, 800). \
-          Lead time scales with how fast RPM is climbing in the current gear."),
+        (
+            "Stage 1 — No data yet",
+            "Uses a conservative estimate: shifts at ~94 % of Forza's reported max RPM, \
+          leaning early to avoid hitting the limiter.",
+        ),
+        (
+            "Stage 2 — Rev limit observed",
+            "After a few laps the app locks in the actual RPM ceiling it has seen and \
+          tightens the warning accordingly.",
+        ),
+        (
+            "Stage 3 — Limiter bounce detected",
+            "If you hold full throttle at the limiter the characteristic RPM oscillation \
+          is detected and the exact limit is confirmed.",
+        ),
+        (
+            "Stage 4-5 — Power curve + gear ratios",
+            "Full-throttle runs build a per-car power curve (100 RPM buckets). \
+          Gear drop ratios are measured from your actual upshifts.",
+        ),
+        (
+            "Stage 6 — Optimal shift point",
+            "The app finds the RPM where power after an upshift exceeds current power \
+          (>0.5 % threshold). That becomes the shift target.",
+        ),
+        (
+            "Stage 7 — Dynamic warning",
+            "The light fires early: warning_rpm = shift_rpm - clamp(rpm_rate x 0.20s, 100, 800). \
+          Lead time scales with how fast RPM is climbing in the current gear.",
+        ),
     ];
 
     for (title, body) in stages {
@@ -432,54 +553,81 @@ fn help_ui(ui: &mut egui::Ui) {
         .show(ui, |ui| {
             let swatch = |ui: &mut egui::Ui, color: Color32, label: &str, desc: &str| {
                 ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(12.0, 12.0),
-                        egui::Sense::hover(),
-                    );
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
                     ui.painter().circle_filled(rect.center(), 6.0, color);
                     ui.label(RichText::new(label).small().strong());
                 });
                 ui.label(RichText::new(desc).small().weak());
                 ui.end_row();
             };
-            swatch(ui, Color32::from_rgb(0x26, 0xf0, 0x6e), "Green  (1–4)",
-                "RPM building — shift point not yet near.");
-            swatch(ui, Color32::from_rgb(0xf3, 0xdf, 0x4e), "Yellow (5–8)",
-                "Approaching the shift point.");
-            swatch(ui, Color32::from_rgb(0xff, 0x36, 0x58), "Red    (9–11)",
-                "Getting close — prepare to shift.");
-            swatch(ui, Color32::from_rgb(0xd8, 0x46, 0xff), "Purple (12–14) + flash",
-                "Shift NOW. All LEDs flash rapidly until you upshift.");
+            swatch(
+                ui,
+                Color32::from_rgb(0x26, 0xf0, 0x6e),
+                "Green  (1–4)",
+                "RPM building — shift point not yet near.",
+            );
+            swatch(
+                ui,
+                Color32::from_rgb(0xf3, 0xdf, 0x4e),
+                "Yellow (5–8)",
+                "Approaching the shift point.",
+            );
+            swatch(
+                ui,
+                Color32::from_rgb(0xff, 0x36, 0x58),
+                "Red    (9–11)",
+                "Getting close — prepare to shift.",
+            );
+            swatch(
+                ui,
+                Color32::from_rgb(0xd8, 0x46, 0xff),
+                "Purple (12–14) + flash",
+                "Shift NOW. All LEDs flash rapidly until you upshift.",
+            );
         });
 }
 
 // ── Main app ──────────────────────────────────────────────────────────────────
 
 pub(crate) struct ForzaTachoApp {
-    hub:          Arc<TelemetryHub>,
-    http_port:    u16,
-    udp_port:     u16,
-    demo_mode:    bool,
+    hub: Arc<TelemetryHub>,
+    http_port: u16,
+    udp_port: u16,
+    demo_mode: bool,
+    local_only: bool,
+    local_only_active: bool,
+    config_path: PathBuf,
+    settings_notice: String,
     lan_addresses: Vec<Ipv4Addr>,
     // Overlay
-    show_overlay:       bool,
-    overlay_close:      Arc<AtomicBool>,
+    show_overlay: bool,
+    overlay_close: Arc<AtomicBool>,
     shift_flash_active: bool,
-    shift_flash_gear:   i64,
+    shift_flash_gear: i64,
 }
 
 impl ForzaTachoApp {
-    pub(crate) fn new(hub: Arc<TelemetryHub>, args: &Args) -> Self {
+    pub(crate) fn new(
+        hub: Arc<TelemetryHub>,
+        args: &Args,
+        launcher_config: LauncherConfig,
+        config_path: PathBuf,
+    ) -> Self {
         Self {
             hub,
-            http_port:    args.http_port,
-            udp_port:     args.udp_port,
-            demo_mode:    args.demo,
+            http_port: args.http_port,
+            udp_port: args.udp_port,
+            demo_mode: args.demo,
+            local_only: launcher_config.local_only,
+            local_only_active: args.http_host == "127.0.0.1" && args.udp_host == "127.0.0.1",
+            config_path,
+            settings_notice: String::new(),
             lan_addresses: lan_addresses(),
-            show_overlay:       false,
-            overlay_close:      Arc::new(AtomicBool::new(false)),
+            show_overlay: false,
+            overlay_close: Arc::new(AtomicBool::new(false)),
             shift_flash_active: false,
-            shift_flash_gear:   0,
+            shift_flash_gear: 0,
         }
     }
 }
@@ -495,15 +643,20 @@ impl eframe::App for ForzaTachoApp {
         }
 
         // Snapshot fields needed inside closures (avoids partial-borrow issues).
-        let status  = self.hub.status();
-        let age_ms  = status["ageMs"].as_u64();
+        let status = self.hub.status();
+        let age_ms = status["ageMs"].as_u64();
         let packets = status["packets"].as_u64().unwrap_or(0);
         let is_live = age_ms.map(|ms| ms < 2000).unwrap_or(false);
 
-        let demo_mode     = self.demo_mode;
-        let http_port     = self.http_port;
-        let udp_port      = self.udp_port;
-        let lan_addresses = self.lan_addresses.clone();
+        let demo_mode = self.demo_mode;
+        let http_port = self.http_port;
+        let udp_port = self.udp_port;
+        let local_only_active = self.local_only_active;
+        let lan_addresses = if local_only_active {
+            vec![Ipv4Addr::LOCALHOST]
+        } else {
+            self.lan_addresses.clone()
+        };
 
         let primary_ip: String = lan_addresses
             .iter()
@@ -516,7 +669,7 @@ impl eframe::App for ForzaTachoApp {
         let mut sorted_addrs = lan_addresses.clone();
         sorted_addrs.sort_by_key(|ip| ip.is_loopback());
 
-        let has_lan_ip = lan_addresses.iter().any(|ip| !ip.is_loopback());
+        let has_lan_ip = local_only_active || lan_addresses.iter().any(|ip| !ip.is_loopback());
 
         // ── Main window ───────────────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -611,6 +764,16 @@ impl eframe::App for ForzaTachoApp {
                         .small(),
                     );
                 }
+                if local_only_active {
+                    ui.add_space(5.0);
+                    ui.label(
+                        RichText::new(
+                            "Local-only mode active — dashboard and UDP listener are bound to 127.0.0.1.",
+                        )
+                        .color(Color32::from_rgb(255, 190, 20))
+                        .small(),
+                    );
+                }
 
                 ui.add_space(10.0);
                 ui.separator();
@@ -688,6 +851,39 @@ impl eframe::App for ForzaTachoApp {
                                 ui.end_row();
                             });
                         ui.add_space(4.0);
+                        let before = self.local_only;
+                        ui.checkbox(
+                            &mut self.local_only,
+                            "Local-only mode (applies after restart)",
+                        )
+                        .on_hover_text(
+                            "Binds HTTP and UDP to 127.0.0.1 so the dashboard is not exposed on the LAN.",
+                        );
+                        if self.local_only != before {
+                            let config = LauncherConfig {
+                                local_only: self.local_only,
+                            };
+                            self.settings_notice = match config.save(&self.config_path) {
+                                Ok(()) => {
+                                    if self.local_only {
+                                        "Local-only saved. Restart forza-tacho to bind only to 127.0.0.1."
+                                            .to_string()
+                                    } else {
+                                        "LAN mode saved. Restart forza-tacho to listen on the network again."
+                                            .to_string()
+                                    }
+                                }
+                                Err(e) => format!("Could not save launcher settings: {e}"),
+                            };
+                        }
+                        if !self.settings_notice.is_empty() {
+                            ui.label(
+                                RichText::new(&self.settings_notice)
+                                    .small()
+                                    .color(Color32::from_rgb(255, 190, 20)),
+                            );
+                        }
+                        ui.add_space(4.0);
                         ui.label(
                             RichText::new(
                                 "Change ports at startup with --http-port / --udp-port.",
@@ -742,15 +938,15 @@ impl eframe::App for ForzaTachoApp {
 
         // ── Overlay viewport (separate OS window) ─────────────────────────────
         if self.show_overlay {
-            let latest     = self.hub.latest();
-            let time       = ctx.input(|i| i.time);
-            let led_state  = compute_led_state(
+            let latest = self.hub.latest();
+            let time = ctx.input(|i| i.time);
+            let led_state = compute_led_state(
                 latest.as_ref(),
                 time,
                 &mut self.shift_flash_active,
                 &mut self.shift_flash_gear,
             );
-            let close_sig  = self.overlay_close.clone();
+            let close_sig = self.overlay_close.clone();
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("shift_leds_overlay"),
@@ -776,7 +972,12 @@ impl eframe::App for ForzaTachoApp {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub(crate) fn run(hub: Arc<TelemetryHub>, args: &Args) -> anyhow::Result<()> {
+pub(crate) fn run(
+    hub: Arc<TelemetryHub>,
+    args: &Args,
+    launcher_config: LauncherConfig,
+    launcher_config_path: PathBuf,
+) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("forza-tacho")
@@ -788,7 +989,14 @@ pub(crate) fn run(hub: Arc<TelemetryHub>, args: &Args) -> anyhow::Result<()> {
     eframe::run_native(
         "forza-tacho",
         options,
-        Box::new(move |_cc| Ok(Box::new(ForzaTachoApp::new(hub, &args)))),
+        Box::new(move |_cc| {
+            Ok(Box::new(ForzaTachoApp::new(
+                hub,
+                &args,
+                launcher_config,
+                launcher_config_path,
+            )))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
 }

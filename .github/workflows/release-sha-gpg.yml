@@ -1,0 +1,70 @@
+name: Build Release + SHA256 + optional GPG sign
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-sign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@v1
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Install mingw for Windows target
+        run: |
+          sudo apt update
+          sudo apt install -y mingw-w64
+
+      - name: Add Windows target
+        run: rustup target add x86_64-pc-windows-gnu || true
+
+      - name: Cargo build Linux release
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Cargo build Windows release
+        run: cargo build --release --target x86_64-pc-windows-gnu
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p release-artifacts
+          cp target/x86_64-unknown-linux-gnu/release/forza-tacho release-artifacts/forza-tacho-linux-x86_64 || true
+          cp target/x86_64-pc-windows-gnu/release/forza-tacho.exe release-artifacts/forza-tacho-windows.exe || true
+          ls -la release-artifacts
+
+      - name: Generate SHA256SUMS
+        working-directory: release-artifacts
+        run: |
+          sha256sum * > SHA256SUMS.txt || true
+          cat SHA256SUMS.txt || true
+
+      - name: Optionally sign SHA256SUMS with GPG
+        if: secrets.GPG_PRIVATE_KEY != ''
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -e
+          mkdir -p ~/.gnupg
+          echo "$GPG_PRIVATE_KEY" | base64 --decode > /tmp/private.key.asc
+          gpg --batch --import /tmp/private.key.asc
+          gpg --version
+          gpg --batch --yes --armor --detach-sign -o SHA256SUMS.txt.asc SHA256SUMS.txt
+          ls -la SHA256SUMS.txt* || true
+        working-directory: release-artifacts
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: release-artifacts

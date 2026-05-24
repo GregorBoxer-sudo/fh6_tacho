@@ -65,6 +65,9 @@ The IP address is shown right in the launcher window — there's a copy button n
 > You can run it on any machine on the same network — a spare laptop, a Raspberry Pi, whatever.  
 > Point Forza's Data Out at that machine's IP, and open the dashboard from anywhere on the network.
 
+> **Privacy mode:**
+> In the launcher settings you can enable **Local-only mode**. After restart, HTTP and UDP bind to `127.0.0.1`, so the dashboard is only reachable from the same PC and is not exposed on your LAN.
+
 ---
 
 ### 3. Open the dashboard
@@ -255,10 +258,12 @@ data/
   power_curves.json     <- learned shift points, one entry per car
   drive_sessions/       <- one .jsonl file per session
   map_calibration.json  <- map calibration points for world->image alignment
+  launcher_config.json  <- launcher preferences, including Local-only mode
 logs/                   <- only created with --inspect or --shift-cache-log
 ```
 
 Deleting `data/` resets all learned shift data.
+If `data/map_calibration.json` does not exist yet, the embedded default calibration from `static/map_calibration.default.json` is used.
 
 </details>
 
@@ -290,6 +295,8 @@ Deleting `data/` resets all learned shift data.
 - Session detail now includes the map directly under the charts (`/analytics.html`).
 - Map coloring supports: `Plain`, `Speed`, `Drift`, `Slip`, `G Lat`, `G Total`.
 - Analytics includes the full map workflow (track view + calibration in debug mode).
+- Replay controls let you play a recorded session back through the chart and map marker.
+- Car analysis compares learned shift points against the standard fallback shift target.
 - Track line width is rendered with constant on-screen pixel thickness while zooming.
 - Analytics layout uses slimmer side panes, a wider center pane, and a taller map canvas for better large-screen usability.
 - Session stats now include:
@@ -339,17 +346,7 @@ Disk writes happen only when the power curve is updated (~every 0.3 s during lea
 
 ## Releases
 
-Releases are built automatically by GitHub Actions when a version tag is pushed.  
-Windows, Linux (x86-64), and macOS (universal) binaries are attached to every release.
-
-To publish a new release:
-
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-The workflow (`.github/workflows/release.yml`) builds both targets in parallel and creates the GitHub release with auto-generated notes.
+Releases are published on GitHub Releases. Build and publishing are handled by CI workflows.
 
 ---
 
@@ -480,6 +477,12 @@ Parts of this project were developed with AI assistance — particularly the shi
 - [Copilot / Codex](https://github.com/features/copilot) (OpenAI)
 
 ---
+
+**Hinweise**
+
+- **Play-Steuerung (Analytics):** Die Wiedergabe-/Play-Steuerung im Analytics-View wird nur für aufgezeichnete *Sessions* angezeigt. Beim Betrachten eines *Car*-Eintrags werden die Replay-Controls ausgeblendet. Falls du das Play-Element trotzdem bei Cars siehst, prüfe, ob du im Session-Tab angekommen bist oder lade die Seite neu (`F5`).
+
+*Weitere Hinweise zur Distribution (z. B. Signieren der Exe) wurden entfernt — README zeigt nur Feature- und Bedienhinweise.*
 
 ## License
 

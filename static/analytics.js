@@ -25,6 +25,11 @@ let detailMapTransformCache = null;
 let detailProjectedTrack = [];
 let detailProjectionDirty = true;
 let detailMapDrawQueued = false;
+let replayIndex = 0;
+let replayPlaying = false;
+let replayRaf = 0;
+let replayLastFrame = 0;
+let replayAccumulator = 0;
 let detailMapView   = {
   scale: 1,
   tx: 0,
@@ -62,6 +67,75 @@ function scheduleDetailMapDraw() {
     detailMapDrawQueued = false;
     drawDetailMap(detailTrack);
   });
+}
+
+function stopReplay() {
+  replayPlaying = false;
+  replayLastFrame = 0;
+  replayAccumulator = 0;
+  if (replayRaf) cancelAnimationFrame(replayRaf);
+  replayRaf = 0;
+  const btn = $("replayPlayBtn");
+  if (btn) btn.textContent = "Play";
+}
+
+function updateReplayUi() {
+  const slider = $("replaySlider");
+  const label = $("replayLabel");
+  if (!slider || !label) return;
+  const max = Math.max(0, detailSamples.length - 1);
+  replayIndex = clamp(replayIndex, 0, max);
+  slider.max = String(max);
+  slider.value = String(replayIndex);
+  const sample = detailSamples[replayIndex] || {};
+  label.textContent = timeText(sample.t || 0);
+}
+
+function setReplayIndex(index) {
+  replayIndex = clamp(Math.round(index), 0, Math.max(0, detailSamples.length - 1));
+  updateReplayUi();
+  drawSessionChart(detailSamples);
+  scheduleDetailMapDraw();
+}
+
+function replayStep(now) {
+  if (!replayPlaying) return;
+  if (!replayLastFrame) replayLastFrame = now;
+  const speed = Number($("replaySpeed")?.value) || 1;
+  const elapsed = Math.min(100, now - replayLastFrame);
+  replayLastFrame = now;
+  replayAccumulator += elapsed * speed * 0.02;
+  if (replayAccumulator >= 1) {
+    const advance = Math.floor(replayAccumulator);
+    replayAccumulator -= advance;
+    setReplayIndex(replayIndex + advance);
+    if (replayIndex >= detailSamples.length - 1) {
+      stopReplay();
+      return;
+    }
+  }
+  replayRaf = requestAnimationFrame(replayStep);
+}
+
+function toggleReplay() {
+  if (detailSamples.length < 2) return;
+  replayPlaying = !replayPlaying;
+  $("replayPlayBtn").textContent = replayPlaying ? "Pause" : "Play";
+  if (replayPlaying) {
+    if (replayIndex >= detailSamples.length - 1) setReplayIndex(0);
+    replayRaf = requestAnimationFrame(replayStep);
+  } else {
+    stopReplay();
+  }
+}
+
+function configureReplayControls(enabled) {
+  const controls = $("replayControls");
+  if (!controls) return;
+  controls.hidden = !enabled;
+  stopReplay();
+  replayIndex = 0;
+  updateReplayUi();
 }
 
 function clamp(value, min, max) {
@@ -190,6 +264,7 @@ async function selectSession(id) {
   renderCars();
   $("chartTabs").style.display = "none";
   $("detailMapSection").style.display = "";
+  configureReplayControls(true);
   const [detail, trackData] = await Promise.all([
     loadJson(`/api/analytics/sessions/${encodeURIComponent(id)}`),
     loadJson(`/api/analytics/sessions/${encodeURIComponent(id)}/track`),
@@ -215,6 +290,7 @@ async function selectCar(key) {
   setActiveTab("shifts");
   $("chartTabs").style.display = "";
   $("detailMapSection").style.display = "none";
+  configureReplayControls(false);
 
   // Show detail immediately, curve loads in parallel
   if (currentCar) renderCarDetail(currentCar);
@@ -246,6 +322,7 @@ document.querySelectorAll(".chartTab").forEach((btn) => {
 
 function renderDetail(summary, samples) {
   detailSamples = Array.isArray(samples) ? samples : [];
+  replayIndex = 0;
   $("detailTitle").textContent = `${summary.carKey || "Session"} · ${timeText(summary.duration)}`;
   const stats = [
     ["Top Speed", `${num(summary.maxSpeed)} km/h`],
@@ -270,6 +347,7 @@ function renderDetail(summary, samples) {
     <span>Best Lap ${summary.bestLap ? timeText(summary.bestLap) : "--"}</span>
     <span>Track Src ${detailTrackSrc || "-"}</span>
   `;
+  updateReplayUi();
   drawSessionChart(detailSamples);
 }
 
@@ -292,12 +370,49 @@ function renderCarDetail(car) {
   ).join("");
 
   const shifts = Object.entries(car.shiftTargets || {}).sort(([a], [b]) => Number(a) - Number(b));
+  const standards = car.standardShiftTargets || {};
   const drops  = Object.entries(car.dropRatios   || {}).sort(([a], [b]) => Number(a) - Number(b));
+  const comparisons = shifts.length
+    ? shifts.map(([g, rpm]) => {
+        const learned = Number(rpm) || 0;
+        const standard = Number(standards[g]) || 0;
+        const delta = learned && standard ? learned - standard : 0;
+        const sign = delta > 0 ? "+" : "";
+        return `<span>G${g}: learned ${Math.round(learned)} / std ${Math.round(standard)} rpm (${sign}${Math.round(delta)})</span>`;
+      })
+    : Object.entries(standards)
+        .sort(([a], [b]) => Number(a) - Number(b))
+        .map(([g, rpm]) => `<span>G${g}: std ${Math.round(rpm)} rpm</span>`);
   $("lapInfo").innerHTML = [
     `<span>Class ${car.class || "-"}</span>`,
     `<span>${car.drivetrain || "-"}</span>`,
-    ...shifts.map(([g, rpm]) => `<span>Gear ${g} → ${Math.round(rpm)} rpm</span>`),
-    ...drops .map(([g, r])   => `<span>Drop G${g}: ${num(r, 3)}</span>`),
+    ...comparisons,
+    ...drops.map(([g, r]) => {
+      // Robustly extract a numeric ratio from different possible shapes:
+      // - number (e.g. 0.895)
+      // - string ("0.895")
+      // - object { ratio: number, samples: N }
+      // - object with a single numeric value
+      let ratio = 0;
+      if (r == null) {
+        ratio = 0;
+      } else if (typeof r === 'number') {
+        ratio = r;
+      } else if (typeof r === 'string') {
+        ratio = Number(r) || 0;
+      } else if (typeof r === 'object') {
+        if (Number.isFinite(Number(r.ratio))) {
+          ratio = Number(r.ratio);
+        } else {
+          // find first finite numeric property value
+          for (const k of Object.keys(r)) {
+            const v = Number(r[k]);
+            if (Number.isFinite(v)) { ratio = v; break; }
+          }
+        }
+      }
+      return `<span>Drop ${g}: ${num(ratio, 3)}</span>`;
+    }),
   ].join("");
 
   drawCarChart(car);
@@ -349,6 +464,21 @@ function drawSessionChart(samples) {
   legendItem(ctx,  82, 18, "#f3df4e", "RPM");
   legendItem(ctx, 142, 18, "#26f06e", "Throttle");
   legendItem(ctx, 197, 18, "#ff3658", "Brake");
+
+  if (samples.length > 1) {
+    const idx = clamp(replayIndex, 0, samples.length - 1);
+    const x = (idx / (samples.length - 1)) * w;
+    ctx.strokeStyle = "#ff3ea5";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+    ctx.fillStyle = "#ff3ea5";
+    ctx.beginPath();
+    ctx.arc(x, 14, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 function drawSeries(ctx, samples, key, color, w, h, max) {
@@ -375,19 +505,25 @@ function drawCarChart(car) {
     .map(([g, rpm]) => ({ gear: Number(g), rpm }))
     .filter((s) => s.rpm > 0)
     .sort((a, b) => a.gear - b.gear);
+  const standardMap = car.standardShiftTargets || {};
+  const standardShifts = Object.entries(standardMap)
+    .map(([g, rpm]) => ({ gear: Number(g), rpm: Number(rpm) || 0 }))
+    .filter((s) => s.rpm > 0)
+    .sort((a, b) => a.gear - b.gear);
 
-  if (!shifts.length) {
+  if (!shifts.length && !standardShifts.length) {
     ctx.fillStyle = "#6b8a99"; ctx.font = "13px sans-serif"; ctx.textAlign = "center";
     ctx.fillText("No shift points recorded yet", w / 2, h / 2);
     ctx.textAlign = "left";
     return;
   }
 
-  const maxRpm = Math.max(...shifts.map((s) => s.rpm)) * 1.18;
+  const chartShifts = shifts.length ? shifts : standardShifts;
+  const maxRpm = Math.max(...chartShifts.map((s) => s.rpm), ...standardShifts.map((s) => s.rpm)) * 1.18;
   const pad    = { left: 56, right: 16, top: 36, bottom: 36 };
   const cW = w - pad.left - pad.right;
   const cH = h - pad.top  - pad.bottom;
-  const slotW = cW / shifts.length;
+  const slotW = cW / chartShifts.length;
   const barW  = Math.min(72, slotW * 0.55);
 
   for (let i = 0; i <= 5; i++) {
@@ -399,13 +535,24 @@ function drawCarChart(car) {
     ctx.fillText(v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v, pad.left - 6, y + 4);
   }
 
-  shifts.forEach((s, i) => {
+  chartShifts.forEach((s, i) => {
     const cx   = pad.left + slotW * i + slotW / 2;
+    const standard = Number(standardMap[String(s.gear)]) || 0;
+    if (standard > 0) {
+      const refY = pad.top + cH - (standard / maxRpm) * cH;
+      ctx.strokeStyle = "#c0d4dc99";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx - barW * 0.65, refY);
+      ctx.lineTo(cx + barW * 0.65, refY);
+      ctx.stroke();
+    }
     const barH = (s.rpm / maxRpm) * cH;
     const x    = cx - barW / 2;
     const y    = pad.top + cH - barH;
     const grad = ctx.createLinearGradient(0, y, 0, y + barH);
-    grad.addColorStop(0, "#55e8ff"); grad.addColorStop(1, "#0d4a58");
+    grad.addColorStop(0, shifts.length ? "#55e8ff" : "#7f8b93");
+    grad.addColorStop(1, shifts.length ? "#0d4a58" : "#303a40");
     ctx.fillStyle = grad;
     ctx.fillRect(x, y, barW, barH);
     ctx.fillStyle = "#e0f8ff"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
@@ -415,7 +562,7 @@ function drawCarChart(car) {
   });
 
   ctx.fillStyle = "#9aaeb8"; ctx.font = "11px sans-serif"; ctx.textAlign = "left";
-  ctx.fillText("Optimal Shift Points — RPM per Gear", pad.left, 20);
+  ctx.fillText("Shift Points — learned bars, standard reference ticks", pad.left, 20);
 
   const obsRpm = Number(car.observedRpm);
   if (obsRpm > 0 && obsRpm <= maxRpm) {
@@ -875,6 +1022,23 @@ function projectDetailPoint(point, transform) {
   };
 }
 
+function projectReplaySample(sample, transform) {
+  const position = sample?.position || {};
+  const world = {
+    x: Number(position.x),
+    z: Number(position.z),
+    speed: Number(sample?.speed) || 0,
+    drift: Number(sample?.drift) || 0,
+    slip: Number(sample?.slip) || 0,
+    gLat: Number(sample?.gLat) || 0,
+    gLong: Number(sample?.gLong) || 0,
+    gTotal: Math.hypot(Number(sample?.gLat) || 0, Number(sample?.gLong) || 0),
+  };
+  if (!Number.isFinite(world.x) || !Number.isFinite(world.z)) return null;
+  const point = projectDetailPoint(world, transform);
+  return Number.isFinite(point.x) && Number.isFinite(point.y) ? point : null;
+}
+
 function ensureDetailProjection() {
   if (!detailProjectionDirty) return;
   const transform = computeDetailMapTransform(mapCalibration.points);
@@ -1037,6 +1201,18 @@ function drawDetailMap(track) {
     ctx.beginPath();
     ctx.arc(end.x, end.y, Math.max(3 / scale, 1.2), 0, Math.PI * 2);
     ctx.fill();
+
+    const replayPoint = projectReplaySample(detailSamples[replayIndex], transform);
+    if (replayPoint) {
+      const r = Math.max(6 / scale, 2.2);
+      ctx.fillStyle = "#ff3ea5";
+      ctx.strokeStyle = "rgba(255,255,255,0.9)";
+      ctx.lineWidth = Math.max(2 / scale, 0.8);
+      ctx.beginPath();
+      ctx.arc(replayPoint.x, replayPoint.y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
   } else if (transform) {
     ctx.fillStyle = "#6b8a99";
     ctx.font = `${Math.max(11 / scale, 5)}px sans-serif`;
@@ -1201,6 +1377,14 @@ $("detailFlipZBtn").addEventListener("click", () => {
   scheduleDetailMapDraw();
 });
 $("detailSaveCalibrationBtn").addEventListener("click", saveDetailCalibration);
+$("replayPlayBtn").addEventListener("click", toggleReplay);
+$("replaySlider").addEventListener("input", (event) => {
+  stopReplay();
+  setReplayIndex(Number(event.target.value) || 0);
+});
+$("replaySpeed").addEventListener("change", () => {
+  replayAccumulator = 0;
+});
 window.addEventListener("resize", () => {
   detailMapView.initialized = false;
   if (selectedCar && currentCar) {
@@ -1212,6 +1396,7 @@ window.addEventListener("resize", () => {
   scheduleDetailMapDraw();
 });
 window.addEventListener("beforeunload", () => {
+  stopReplay();
   stopMapLiveStream();
 });
 toggleCalibrationPane();

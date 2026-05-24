@@ -57,6 +57,17 @@
             <button class="chartTab" data-chart="power">Power &amp; Torque</button>
           </div>
           <canvas id="sessionChart" width="900" height="280"></canvas>
+          <div id="replayControls" class="replayControls" hidden>
+            <button id="replayPlayBtn" type="button">Play</button>
+            <input id="replaySlider" type="range" min="0" max="0" value="0" step="1">
+            <select id="replaySpeed">
+              <option value="0.5">0.5x</option>
+              <option value="1" selected>1x</option>
+              <option value="2">2x</option>
+              <option value="4">4x</option>
+            </select>
+            <span id="replayLabel">0:00.0</span>
+          </div>
           <section id="detailMapSection" class="detailMapSection">
             <div class="mapToolsRow">
               <strong>Session Map</strong>

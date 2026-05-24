@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use analytics::TelemetryRecorder;
-use config::Args;
+use config::{Args, LauncherConfig};
 use logging::ShiftCacheLogger;
 use runtime::{demo_loop, run_http, udp_loop};
 use shift::PowerCurveStore;
@@ -40,7 +40,7 @@ fn is_headless() -> bool {
 // ─── main ────────────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // Use the directory that contains the executable as the data root so the
     // app works correctly regardless of the working directory it is launched from.
@@ -48,6 +48,12 @@ fn main() -> Result<()> {
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let launcher_config_path = root.join("data/launcher_config.json");
+    let launcher_config = LauncherConfig::load(&launcher_config_path);
+    if launcher_config.local_only {
+        args.http_host = "127.0.0.1".to_string();
+        args.udp_host = "127.0.0.1".to_string();
+    }
 
     let logger = if args.shift_cache_log {
         Some(Arc::new(ShiftCacheLogger::new(
@@ -70,7 +76,15 @@ fn main() -> Result<()> {
     let use_gui = !args.no_gui && !is_headless();
 
     if use_gui {
-        run_with_gui(args, root, hub, power_curves, recorder)
+        run_with_gui(
+            args,
+            root,
+            launcher_config,
+            launcher_config_path,
+            hub,
+            power_curves,
+            recorder,
+        )
     } else {
         run_terminal(args, root, hub, power_curves, recorder)
     }
@@ -83,6 +97,8 @@ fn main() -> Result<()> {
 fn run_with_gui(
     args: Args,
     root: std::path::PathBuf,
+    launcher_config: LauncherConfig,
+    launcher_config_path: std::path::PathBuf,
     hub: Arc<TelemetryHub>,
     power_curves: Arc<PowerCurveStore>,
     recorder: Arc<TelemetryRecorder>,
@@ -135,7 +151,7 @@ fn run_with_gui(
     });
 
     // egui/eframe must run on the main thread.
-    gui::run(hub, &args)
+    gui::run(hub, &args, launcher_config, launcher_config_path)
 }
 
 // ─── Terminal mode ───────────────────────────────────────────────────────────

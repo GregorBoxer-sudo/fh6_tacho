@@ -8,6 +8,9 @@ use std::{
     sync::Mutex,
 };
 
+use crate::config::{
+    INITIAL_ENGINE_LIMIT_RATIO_OF_TACHO_MAX, SAFETY_SHIFT_TARGET_RATIO_OF_ENGINE_LIMIT,
+};
 use crate::shift::power_curve_key;
 use crate::util::{get_f64, now_seconds};
 
@@ -38,7 +41,7 @@ impl TelemetryRecorder {
         Ok(Self {
             dir,
             state: Mutex::new(RecorderState {
-                file: None,  // type inferred as Option<BufWriter<File>>
+                file: None, // type inferred as Option<BufWriter<File>>
                 session_id: String::new(),
                 session_started_at: 0.0,
                 last_sample_at: 0.0,
@@ -56,7 +59,10 @@ impl TelemetryRecorder {
             return;
         }
 
-        let race_on = payload.get("raceOn").and_then(Value::as_bool).unwrap_or(false);
+        let race_on = payload
+            .get("raceOn")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -168,7 +174,11 @@ pub(crate) fn session_track(dir: &Path, id: &str, max_points: usize) -> Value {
         }
     }
     let using_raw = !raw_points.is_empty();
-    let mut points = if using_raw { raw_points } else { fallback_points };
+    let mut points = if using_raw {
+        raw_points
+    } else {
+        fallback_points
+    };
     if max_points > 0 && points.len() > max_points {
         points = downsample_series(&points, max_points);
     }
@@ -200,9 +210,11 @@ pub(crate) fn car_power_curve(power_curves_path: &Path, car_key: &str) -> Value 
         .filter_map(|(rpm_str, val)| {
             let rpm = rpm_str.parse::<f64>().ok()?;
             let obj = val.as_object()?;
-            let power  = obj.get("power") .and_then(Value::as_f64).unwrap_or(0.0);
+            let power = obj.get("power").and_then(Value::as_f64).unwrap_or(0.0);
             let torque = obj.get("torque").and_then(Value::as_f64).unwrap_or(0.0);
-            if power <= 0.0 && torque <= 0.0 { return None; }
+            if power <= 0.0 && torque <= 0.0 {
+                return None;
+            }
             Some(json!({ "rpm": rpm, "power": power, "torque": torque }))
         })
         .collect();
@@ -226,6 +238,8 @@ pub(crate) fn car_browser(power_curves_path: &Path, sessions_dir: &Path) -> Valu
     for (key, curve_value) in curves {
         let curve = curve_value.as_object().cloned().unwrap_or_default();
         let stats = session_stats.get(&key);
+        let max_rpm = number_field(&curve, "maxRpmSignature");
+        let max_gear = number_field(&curve, "maxObservedGear");
         cars.push(json!({
             "key": key,
             "ordinal": key.split(':').next().unwrap_or(""),
@@ -236,10 +250,11 @@ pub(crate) fn car_browser(power_curves_path: &Path, sessions_dir: &Path) -> Valu
             "sessions": stats.map(|s| s.sessions).unwrap_or(0),
             "maxSpeed": stats.map(|s| s.max_speed).unwrap_or(0.0),
             "maxPower": stats.map(|s| s.max_power).unwrap_or(0.0),
-            "maxRpm": number_field(&curve, "maxRpmSignature"),
+            "maxRpm": max_rpm,
             "observedRpm": number_field(&curve, "savedMaxObservedRpm"),
-            "maxGear": number_field(&curve, "maxObservedGear"),
+            "maxGear": max_gear,
             "shiftTargets": curve.get("optimalShiftRpmByGear").cloned().unwrap_or_else(|| json!({})),
+            "standardShiftTargets": standard_shift_targets(max_rpm, max_gear),
             "dropRatios": curve.get("gearDropRatios").cloned().unwrap_or_else(|| json!({})),
             "lastSeenAt": number_field(&curve, "lastSeenAt"),
         }));
@@ -251,6 +266,21 @@ pub(crate) fn car_browser(power_curves_path: &Path, sessions_dir: &Path) -> Valu
     });
     cars.truncate(MAX_CARS);
     json!({ "cars": cars })
+}
+
+fn standard_shift_targets(max_rpm: f64, max_gear: f64) -> Value {
+    let gear_count = max_gear.round() as i64;
+    if max_rpm <= 0.0 || gear_count <= 0 {
+        return json!({});
+    }
+    let standard_rpm = max_rpm
+        * INITIAL_ENGINE_LIMIT_RATIO_OF_TACHO_MAX
+        * SAFETY_SHIFT_TARGET_RATIO_OF_ENGINE_LIMIT;
+    let mut targets = Map::new();
+    for gear in 1..=gear_count {
+        targets.insert(gear.to_string(), json!(standard_rpm));
+    }
+    Value::Object(targets)
 }
 
 fn compact_sample(payload: &Value, session_id: &str, started_at: f64) -> Value {

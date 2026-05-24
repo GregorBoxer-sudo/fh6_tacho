@@ -1,5 +1,9 @@
 use clap::Parser;
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 pub(crate) const DEFAULT_ENGINE_LIMIT_RATIO_OF_TACHO_MAX: f64 = 0.895;
 /// Initial estimate for cars with no drive data yet.
@@ -102,4 +106,28 @@ pub(crate) struct Args {
     /// Enable debug-only tools in the web UI (e.g. map calibration mode).
     #[arg(long)]
     pub(crate) debug: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct LauncherConfig {
+    pub(crate) local_only: bool,
+}
+
+impl LauncherConfig {
+    pub(crate) fn load(path: &Path) -> Self {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Self>(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn save(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let text = serde_json::to_string_pretty(self)?;
+        fs::write(path, text)?;
+        Ok(())
+    }
 }

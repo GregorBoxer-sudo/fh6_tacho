@@ -4,7 +4,10 @@ use axum::{
     body::Body,
     extract::State,
     http::{StatusCode, Uri, header},
-    response::{IntoResponse, Response, sse::{Event, KeepAlive, Sse}},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::get,
 };
 use futures_util::StreamExt;
@@ -133,9 +136,8 @@ impl PositionFallback {
         self.last_at = Some(at);
 
         let raw_is_nonzero = raw_x.abs() > f64::EPSILON || raw_z.abs() > f64::EPSILON;
-        let raw_is_valid = raw_x.is_finite()
-            && raw_z.is_finite()
-            && (raw_is_nonzero || speed_ms < 0.8);
+        let raw_is_valid =
+            raw_x.is_finite() && raw_z.is_finite() && (raw_is_nonzero || speed_ms < 0.8);
 
         if raw_is_valid {
             self.x = raw_x;
@@ -264,7 +266,11 @@ async fn api_session_track(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Json<Value> {
-    Json(session_track(&state.data_dir.join("drive_sessions"), &id, 12000))
+    Json(session_track(
+        &state.data_dir.join("drive_sessions"),
+        &id,
+        12000,
+    ))
 }
 
 async fn api_cars(State(state): State<AppState>) -> Json<Value> {
@@ -278,17 +284,25 @@ async fn api_car_powercurve(
     State(state): State<AppState>,
     axum::extract::Path(key): axum::extract::Path<String>,
 ) -> Json<Value> {
-    Json(car_power_curve(&state.data_dir.join("power_curves.json"), &key))
+    Json(car_power_curve(
+        &state.data_dir.join("power_curves.json"),
+        &key,
+    ))
 }
 
 fn default_calibration() -> Value {
-    json!({
-        "version": 1,
-        "mapImage": "map.jpg",
-        "worldFlipX": false,
-        "worldFlipZ": false,
-        "points": []
-    })
+    StaticAssets::get("map_calibration.default.json")
+        .and_then(|asset| serde_json::from_slice::<Value>(&asset.data).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| {
+            json!({
+                "version": 1,
+                "mapImage": "map.jpg",
+                "worldFlipX": false,
+                "worldFlipZ": false,
+                "points": []
+            })
+        })
 }
 
 fn map_calibration_path(data_dir: &std::path::Path) -> PathBuf {
@@ -342,7 +356,11 @@ async fn api_save_map_calibration(
             .pointer("/pixel/y")
             .and_then(Value::as_f64)
             .unwrap_or(f64::NAN);
-        if !(world_x.is_finite() && world_z.is_finite() && pixel_x.is_finite() && pixel_y.is_finite()) {
+        if !(world_x.is_finite()
+            && world_z.is_finite()
+            && pixel_x.is_finite()
+            && pixel_y.is_finite())
+        {
             continue;
         }
         points.push(json!({
@@ -380,11 +398,7 @@ async fn api_save_map_calibration(
     }
 }
 
-pub(crate) async fn run_http(
-    data_dir: PathBuf,
-    hub: Arc<TelemetryHub>,
-    args: &Args,
-) -> Result<()> {
+pub(crate) async fn run_http(data_dir: PathBuf, hub: Arc<TelemetryHub>, args: &Args) -> Result<()> {
     let state = AppState {
         hub,
         data_dir,
@@ -397,7 +411,10 @@ pub(crate) async fn run_http(
         .route("/api/analytics/sessions/{id}", get(api_session))
         .route("/api/analytics/sessions/{id}/track", get(api_session_track))
         .route("/api/analytics/cars", get(api_cars))
-        .route("/api/analytics/cars/{key}/powercurve", get(api_car_powercurve))
+        .route(
+            "/api/analytics/cars/{key}/powercurve",
+            get(api_car_powercurve),
+        )
         .route(
             "/api/map/calibration",
             get(api_map_calibration).post(api_save_map_calibration),
