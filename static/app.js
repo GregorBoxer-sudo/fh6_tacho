@@ -6,6 +6,7 @@ const els = {
   connection: $("connection"),
   latency: $("latency"),
   speed: $("speed"),
+  speedUnit: $("speedUnit"),
   gear: $("gear"),
   driftAngle: $("driftAngle"),
   driftPeak: $("driftPeak"),
@@ -239,7 +240,7 @@ function setConnection(live) {
 }
 
 function updateTire(el, temp) {
-  el.querySelector("strong").textContent = `${int(temp)} C`;
+  el.querySelector("strong").textContent = conv.fmtTemp(temp, 0);
 }
 
 function updateSlipLeds(leds, combinedSlip) {
@@ -264,7 +265,7 @@ function updateWarnings(data) {
 
   els.understeerWarn.classList.toggle("active", understeer);
   els.oversteerWarn.classList.toggle("active", oversteer);
-  els.tempWarn.classList.toggle("active", hottestTire >= 105); // °C — grip degrades above ~105 °C
+  els.tempWarn.classList.toggle("active", hottestTire >= 110); // °C — grip degrades above ~110 °C
   els.overlapWarn.classList.toggle("active", overlap);
   els.absWarn.classList.toggle("active", absActive);
   els.brakeLockWarn.classList.toggle("active", brakeLock);
@@ -458,7 +459,8 @@ function render(now) {
   els.latency.textContent = `${Math.max(0, Math.round(age))} ms`;
   els.screen.classList.toggle("raceOff", !raceDataActive);
 
-  els.speed.textContent = int(latest.speed.kmh);
+  els.speed.textContent = Math.round(conv.speed(latest.speed.kmh));
+  if (els.speedUnit) els.speedUnit.textContent = conv.speedLabel();
   els.gear.textContent = gearLabel(latest.controls.gear);
   els.rpm.textContent = int(latest.engine.rpm);
   els.rpmValue.textContent = int(latest.engine.rpm);
@@ -476,6 +478,7 @@ function render(now) {
     : clamp(rpm.redlineRatio, 0, 1);
   const activeLeds = Math.round(ledRatio * els.shiftLeds.length);
   const shiftFlash = shiftFlashState(latest.engine.rpm, rpm.shiftNowRpm, latest.controls.gear);
+  checkShiftAudio();
   const shiftFlashOn = shiftFlash && Math.floor(now / 80) % 2 === 0;
   els.shiftLeds.forEach((led, index) => {
     led.classList.toggle("active", index < activeLeds);
@@ -495,7 +498,7 @@ function render(now) {
   els.steerMarker.style.left = `${(steer + 1) * 50}%`;
 
   els.power.textContent = `${int(latest.engine.powerHp)} hp`;
-  els.torque.textContent = `${int(latest.engine.torqueNm)} Nm`;
+  els.torque.textContent = conv.fmtTorque(latest.engine.torqueNm);
   els.boost.textContent = latest.boost.toFixed(2);
   els.lapNumber.textContent = displayLapNumber(latest);
   els.position.textContent = latest.lap.position > 0 ? int(latest.lap.position) : "--";
@@ -560,6 +563,192 @@ setInterval(() => {
     resetLearnedRpm();
   }
 }, 250);
+
+// ── Web Audio shift-sound engine ──────────────────────────────────────────────
+
+let _audioCtx = null;
+
+/** Create/return a shared AudioContext, resuming it if suspended. */
+async function getAudioCtx() {
+  if (!_audioCtx) {
+    try { _audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {}
+  }
+  if (_audioCtx?.state === "suspended") {
+    try { await _audioCtx.resume(); } catch (_) {}
+  }
+  return _audioCtx;
+}
+// Unlock on any user interaction (needed on iOS and Chrome autoplay policy).
+document.addEventListener("click",   () => getAudioCtx(), { once: true });
+document.addEventListener("keydown", () => getAudioCtx(), { once: true });
+
+/**
+ * Synthesise and play a named shift sound through the browser's audio output.
+ * Valid names: blip | click | beep | chord | buzz.  "none" is silently ignored.
+ */
+async function playShiftSoundWeb(name) {
+  if (!name || name === "none") return;
+  const ctx = await getAudioCtx();
+  if (!ctx) return;
+  try {
+    const sr = ctx.sampleRate;
+    let buf;
+
+    if (name === "blip") {
+      // Falling-pitch sawtooth chirp: 1 400 → 800 Hz, 70 ms, exp decay
+      const n = Math.floor(sr * 0.070);
+      buf = ctx.createBuffer(1, n, sr);
+      const d = buf.getChannelData(0);
+      let phase = 0;
+      for (let i = 0; i < n; i++) {
+        const t = i / sr;
+        phase += (1400 - 600 * (t / 0.070)) / sr;
+        d[i] = (phase % 1) * 2 - 1;
+        d[i] *= Math.exp(-t * 40) * 0.35;
+      }
+
+    } else if (name === "click") {
+      // Sharp square burst at 900 Hz, 30 ms, very fast decay
+      const n = Math.floor(sr * 0.030);
+      buf = ctx.createBuffer(1, n, sr);
+      const d = buf.getChannelData(0);
+      let phase = 0;
+      for (let i = 0; i < n; i++) {
+        const t = i / sr;
+        phase += 900 / sr;
+        d[i] = (phase % 1 < 0.5 ? 1 : -1) * Math.exp(-t * 70) * 0.28;
+      }
+
+    } else if (name === "beep") {
+      // Clean sine at 1 200 Hz, 90 ms
+      const n = Math.floor(sr * 0.090);
+      buf = ctx.createBuffer(1, n, sr);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) {
+        const t = i / sr;
+        d[i] = Math.sin(2 * Math.PI * 1200 * t) * Math.exp(-t * 30) * 0.30;
+      }
+
+    } else if (name === "chord") {
+      // Major triad A4+C5+E5 (440+523+659 Hz), 80 ms
+      const freqs = [440, 523, 659];
+      const n = Math.floor(sr * 0.080);
+      buf = ctx.createBuffer(1, n, sr);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) {
+        const t = i / sr;
+        d[i] = freqs.reduce((s, f) => s + Math.sin(2 * Math.PI * f * t), 0)
+               / freqs.length * Math.exp(-t * 28) * 0.32;
+      }
+
+    } else if (name === "buzz") {
+      // Low sawtooth buzz at 220 Hz, 55 ms
+      const n = Math.floor(sr * 0.055);
+      buf = ctx.createBuffer(1, n, sr);
+      const d = buf.getChannelData(0);
+      let phase = 0;
+      for (let i = 0; i < n; i++) {
+        const t = i / sr;
+        phase += 220 / sr;
+        d[i] = ((phase % 1) * 2 - 1) * Math.exp(-t * 30) * 0.30;
+      }
+    }
+
+    if (buf) {
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start();
+    }
+  } catch (_) {}
+}
+
+/** Preview a sound on the backend device by calling the server. */
+async function previewBackendSound(name) {
+  if (!name || name === "none") return;
+  try {
+    await fetch("/api/shift-sound/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sound: name }),
+    });
+  } catch (_) {}
+}
+
+// ── Settings panel ────────────────────────────────────────────────────────────
+
+function buildSoundSelect(id, currentValue, onChange) {
+  const sel = $(`snd_${id}`);
+  if (!sel) return;
+  // Populate options
+  sel.innerHTML = "";
+  const labels = { none: "None", blip: "Blip", click: "Click", beep: "Beep", chord: "Chord", buzz: "Buzz" };
+  for (const name of SOUND_NAMES) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = labels[name] || name;
+    if (name === currentValue) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  sel.onchange = () => onChange(sel.value);
+}
+
+function refreshSoundSelects() {
+  buildSoundSelect("web", shiftSoundWeb, async (val) => {
+    shiftSoundWeb = val;
+    await saveShiftSoundSettings(shiftSoundWeb, shiftSoundBackend);
+    await playShiftSoundWeb(val);   // preview in this browser
+  });
+}
+
+// Open / close
+$("settingsBtn")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const panel = $("settingsPanel");
+  if (!panel) return;
+  const open = panel.hasAttribute("hidden");
+  if (open) {
+    panel.removeAttribute("hidden");
+    refreshSoundSelects();
+  } else {
+    panel.setAttribute("hidden", "");
+  }
+});
+
+document.addEventListener("click", (e) => {
+  const panel = $("settingsPanel");
+  if (!panel || panel.hasAttribute("hidden")) return;
+  if (!panel.contains(e.target) && e.target.id !== "settingsBtn") {
+    panel.setAttribute("hidden", "");
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") $("settingsPanel")?.setAttribute("hidden", "");
+});
+
+// ── Shift trigger: fire sound on false → true edge ────────────────────────────
+
+let _prevShiftFlash = false;
+
+function checkShiftAudio() {
+  const nowFlash = shiftFlashActive;
+  if (!_prevShiftFlash && nowFlash) {
+    if (shiftSoundWeb !== "none")     playShiftSoundWeb(shiftSoundWeb);
+    // Backend fires autonomously from the Rust GUI; no HTTP call needed here.
+  }
+  _prevShiftFlash = nowFlash;
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+// Load persisted unit preference; toggle button label stays in sync via syncUnitToggleBtns().
+loadUnitSettings().then(syncUnitToggleBtns);
+$("unitToggle")?.addEventListener("click", async () => {
+  await saveUnitSettings(unitSystem === "metric" ? "imperial" : "metric");
+  syncUnitToggleBtns();
+  // The render() loop picks up the conv.* changes automatically on the next frame.
+});
 
 connect();
 requestAnimationFrame(render);

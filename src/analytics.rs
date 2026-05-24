@@ -5,7 +5,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::mpsc::{self, SyncSender},
 };
 
 use crate::config::{
@@ -16,14 +16,26 @@ use crate::util::{get_f64, now_seconds};
 
 const SAMPLE_INTERVAL_SECONDS: f64 = 0.05;
 const SESSION_GAP_SECONDS: f64 = 30.0;
+const MAX_SESSION_DURATION_SECONDS: f64 = 3600.0; // hard cap — never log more than 1 h
 const MAX_SESSIONS: usize = 50;
 const MAX_CARS: usize = 50;
+/// Depth of the channel between the async hot path and the recorder worker.
+/// 128 slots × 20 Hz ≈ 6 s of head-room — in practice the worker drains in µs.
+const RECORDER_CHANNEL_CAP: usize = 128;
 
+/// Handle to the background recording worker.
+///
+/// The async hot path (UDP receive loop, demo loop) calls [`TelemetryRecorder::record`]
+/// which merely clones the telemetry `Value` and sends it over a bounded channel.
+/// The actual file I/O — opening/closing JSONL session files, writing samples —
+/// happens on a dedicated `std::thread` so the Tokio executor is never blocked.
 pub(crate) struct TelemetryRecorder {
-    dir: PathBuf,
-    state: Mutex<RecorderState>,
+    sender: SyncSender<Value>,
+    /// Kept alive so the worker thread lives as long as the recorder.
+    _worker: std::thread::JoinHandle<()>,
 }
 
+/// All mutable recording state lives exclusively on the worker thread.
 struct RecorderState {
     file: Option<BufWriter<File>>,
     session_id: String,
@@ -36,23 +48,40 @@ struct RecorderState {
 
 impl TelemetryRecorder {
     pub(crate) fn new(dir: impl Into<PathBuf>) -> Result<Self> {
-        let dir = dir.into();
+        let dir: PathBuf = dir.into();
         fs::create_dir_all(&dir)?;
-        Ok(Self {
-            dir,
-            state: Mutex::new(RecorderState {
-                file: None, // type inferred as Option<BufWriter<File>>
+        let (sender, receiver) = mpsc::sync_channel::<Value>(RECORDER_CHANNEL_CAP);
+        let worker = std::thread::spawn(move || {
+            let mut state = RecorderState {
+                file: None,
                 session_id: String::new(),
                 session_started_at: 0.0,
                 last_sample_at: 0.0,
                 last_seen_at: 0.0,
                 car_key: String::new(),
                 last_race_on: None,
-            }),
-        })
+            };
+            // Drive the recording loop until the sender side is dropped.
+            while let Ok(payload) = receiver.recv() {
+                state.record_inner(&payload, &dir);
+            }
+            // Flush any in-flight buffered writes before the thread exits.
+            if let Some(mut f) = state.file.take() {
+                let _ = f.flush();
+            }
+        });
+        Ok(Self { sender, _worker: worker })
     }
 
+    /// Non-blocking: clones the telemetry value and sends it to the worker thread.
+    /// Drops the sample silently if the channel is full (should never happen at 20 Hz).
     pub(crate) fn record(&self, payload: &Value) {
+        let _ = self.sender.try_send(payload.clone());
+    }
+}
+
+impl RecorderState {
+    fn record_inner(&mut self, payload: &Value, dir: &Path) {
         let now = get_f64(payload, &["receivedAt"]);
         let car_key = power_curve_key(payload);
         if car_key.is_empty() || now <= 0.0 {
@@ -64,45 +93,44 @@ impl TelemetryRecorder {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Race ended — flush and close the current session so subsequent data starts a new one.
-        if state.last_race_on == Some(true) && !race_on {
-            if let Some(mut f) = state.file.take() {
+        // Race ended — flush and close so subsequent data starts a fresh session.
+        if self.last_race_on == Some(true) && !race_on {
+            if let Some(mut f) = self.file.take() {
                 let _ = f.flush();
             }
         }
 
-        let race_started = state.last_race_on == Some(false) && race_on;
-        state.last_race_on = Some(race_on);
+        let race_started = self.last_race_on == Some(false) && race_on;
+        self.last_race_on = Some(race_on);
 
-        let needs_new_session = state.file.is_none()
-            || state.car_key != car_key
-            || now - state.last_seen_at > SESSION_GAP_SECONDS
-            || race_started;
+        let needs_new_session = self.file.is_none()
+            || self.car_key != car_key
+            || now - self.last_seen_at > SESSION_GAP_SECONDS
+            || race_started
+            || (self.session_started_at > 0.0
+                && now - self.session_started_at >= MAX_SESSION_DURATION_SECONDS);
         if needs_new_session {
-            // Trim old sessions if the limit has been exceeded.
-            trim_old_sessions(&self.dir);
+            trim_old_sessions(dir);
             let session_id = format!("{}-{}", timestamp_id(now), car_key.replace(':', "-"));
-            let path = self.dir.join(format!("{session_id}.jsonl"));
+            let path = dir.join(format!("{session_id}.jsonl"));
             match OpenOptions::new().create(true).append(true).open(path) {
                 Ok(file) => {
-                    state.file = Some(BufWriter::new(file));
-                    state.session_id = session_id;
-                    state.session_started_at = now;
-                    state.last_sample_at = 0.0;
-                    state.car_key = car_key.clone();
+                    self.file = Some(BufWriter::new(file));
+                    self.session_id = session_id;
+                    self.session_started_at = now;
+                    self.last_sample_at = 0.0;
+                    self.car_key = car_key.clone();
                 }
                 Err(_) => return,
             }
         }
-        state.last_seen_at = now;
-        if now - state.last_sample_at < SAMPLE_INTERVAL_SECONDS {
+        self.last_seen_at = now;
+        if now - self.last_sample_at < SAMPLE_INTERVAL_SECONDS {
             return;
         }
-        state.last_sample_at = now;
-        let sample = compact_sample(payload, &state.session_id, state.session_started_at);
-        if let Some(file) = state.file.as_mut()
+        self.last_sample_at = now;
+        let sample = compact_sample(payload, &self.session_id, self.session_started_at);
+        if let Some(file) = self.file.as_mut()
             && let Ok(line) = serde_json::to_string(&sample)
         {
             let _ = writeln!(file, "{line}");
@@ -127,7 +155,7 @@ pub(crate) fn session_detail(dir: &Path, id: &str) -> Value {
     };
     let samples = read_samples(&path);
     let summary = summarize_samples(id, &samples);
-    let series = downsample_series(&samples, 360);
+    let series = downsample_series(&samples, 3600);
     json!({ "summary": summary, "samples": series })
 }
 
@@ -412,6 +440,15 @@ struct Summary {
     shift_count: usize,
     last_gear: i64,
     best_lap: f64,
+    // Race / lap tracking
+    total_samples: usize,
+    race_on_samples: usize,
+    finish_position: i64,
+    max_lap_number: i64,
+    lap_times: Vec<f64>,    // completed lap durations (s)
+    lap_number_init: bool,  // have we seen the first lap number?
+    last_lap_number: i64,   // last seen lap.number value
+    last_lap_current: f64,  // lap.current from the previous sample
 }
 
 impl Summary {
@@ -473,10 +510,44 @@ impl Summary {
         if best_lap > 0.0 && (self.best_lap == 0.0 || best_lap < self.best_lap) {
             self.best_lap = best_lap;
         }
+
+        // ── Race / lap tracking ─────────────────────────────────────────────
+        self.total_samples += 1;
+        if sample.get("raceOn").and_then(Value::as_bool).unwrap_or(false) {
+            self.race_on_samples += 1;
+        }
+        let lap_number  = get_f64(sample, &["lap", "number"]) as i64;
+        let lap_current = get_f64(sample, &["lap", "current"]);
+        let lap_pos     = get_f64(sample, &["lap", "position"]) as i64;
+
+        if !self.lap_number_init {
+            self.last_lap_number = lap_number;
+            self.lap_number_init = true;
+        } else if lap_number > self.last_lap_number && self.last_lap_current > 0.5 {
+            // A lap just completed — the previous sample's `lap.current` is its duration.
+            self.lap_times.push(self.last_lap_current);
+            self.last_lap_number = lap_number;
+        }
+        if lap_number > self.max_lap_number {
+            self.max_lap_number = lap_number;
+        }
+        if lap_pos > 0 {
+            self.finish_position = lap_pos;
+        }
+        self.last_lap_current = lap_current;
     }
 
     fn into_json(self, samples: usize) -> Value {
         let moving = self.moving_samples.max(1) as f64;
+        // A session counts as a "race" when the majority of samples had raceOn=true.
+        let is_race = self.total_samples > 0
+            && self.race_on_samples * 2 >= self.total_samples;
+        // totalLaps = highest lap number seen + 1 (Forza numbers laps 0-based).
+        let total_laps = if self.max_lap_number > 0 {
+            self.max_lap_number + 1
+        } else {
+            0
+        };
         json!({
             "id": self.id,
             "startedAt": self.started_at,
@@ -500,6 +571,11 @@ impl Summary {
             "avgBrake": self.brake_sum / moving,
             "shiftCount": self.shift_count,
             "bestLap": self.best_lap,
+            // Race data
+            "isRace": is_race,
+            "finishPosition": self.finish_position,
+            "totalLaps": total_laps,
+            "lapTimes": self.lap_times,
         })
     }
 }
@@ -554,6 +630,57 @@ fn car_stats_from_sessions(dir: &Path) -> HashMap<String, CarStats> {
         entry.max_power = entry.max_power.max(get_f64(&summary, &["maxPower"]));
     }
     stats
+}
+
+/// Returns a CSV string for the full (non-downsampled) sample series of a session,
+/// or `None` if the session does not exist.
+pub(crate) fn session_csv(dir: &Path, id: &str) -> Option<String> {
+    let path = safe_session_path(dir, id)?;
+    let samples = read_samples(&path);
+    if samples.is_empty() {
+        return None;
+    }
+    // Pre-allocate roughly 120 bytes per row.
+    let mut out = String::with_capacity(256 + samples.len() * 120);
+    out.push_str(
+        "t,speed_kmh,rpm,gear,accel,brake,steer,\
+         g_lat,g_long,drift_deg,slip,\
+         power_hp,torque_nm,boost,\
+         pos_x,pos_z,\
+         race_on,lap_num,lap_current_s,lap_best_s,lap_pos\n",
+    );
+    for s in &samples {
+        let race_on = if s.get("raceOn").and_then(Value::as_bool).unwrap_or(false) {
+            1u8
+        } else {
+            0u8
+        };
+        out.push_str(&format!(
+            "{:.3},{:.1},{:.0},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.1},{:.1},{:.4},{:.2},{:.2},{},{},{:.3},{:.3},{}\n",
+            get_f64(s, &["t"]),
+            get_f64(s, &["speed"]),
+            get_f64(s, &["rpm"]),
+            get_f64(s, &["gear"]) as i64,
+            get_f64(s, &["accel"]),
+            get_f64(s, &["brake"]),
+            get_f64(s, &["steer"]),
+            get_f64(s, &["gLat"]),
+            get_f64(s, &["gLong"]),
+            get_f64(s, &["drift"]),
+            get_f64(s, &["slip"]),
+            get_f64(s, &["power"]),
+            get_f64(s, &["torque"]),
+            get_f64(s, &["boost"]),
+            get_f64(s, &["position", "x"]),
+            get_f64(s, &["position", "z"]),
+            race_on,
+            get_f64(s, &["lap", "number"]) as i64,
+            get_f64(s, &["lap", "current"]),
+            get_f64(s, &["lap", "best"]),
+            get_f64(s, &["lap", "position"]) as i64,
+        ));
+    }
+    Some(out)
 }
 
 fn safe_session_path(dir: &Path, id: &str) -> Option<PathBuf> {

@@ -78,6 +78,68 @@ body {
   line-height: 1;
 }
 
+button.topLink {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+/* ── Settings panel ─────────────────────────────────────────────────────────── */
+
+.settingsPanel {
+  position: absolute;
+  top: 28px;
+  right: 6px;
+  z-index: 100;
+  min-width: 230px;
+  background: #0e1518;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.7);
+}
+
+.settingsRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.settingsLabel {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--label);
+  white-space: nowrap;
+}
+
+.settingsSel {
+  flex: 1;
+  min-width: 0;
+  background: #161e24;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 11px;
+  padding: 3px 6px;
+  cursor: pointer;
+  appearance: auto;
+}
+
+.settingsSel:focus {
+  outline: 1px solid var(--cyan);
+}
+
+.settingsHint {
+  margin: 6px 0 0;
+  font-size: 9px;
+  color: var(--label);
+  text-align: center;
+}
+
 .status {
   width: 10px;
   height: 10px;

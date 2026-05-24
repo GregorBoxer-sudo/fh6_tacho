@@ -3,7 +3,7 @@ use std::{
     net::Ipv4Addr,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -11,6 +11,7 @@ use std::{
 
 use crate::{
     config::{Args, LauncherConfig},
+    settings::AppSettings,
     telemetry::TelemetryHub,
     util::lan_addresses,
 };
@@ -174,18 +175,14 @@ fn paint_leds(painter: &egui::Painter, rect: egui::Rect, state: &LedState) {
             i < state.active
         };
 
-        // Glow rings behind active LEDs
+        // Single soft glow — capped to half the inter-LED gap so it never
+        // bleeds into a neighbouring LED (centers are 2r+gap apart, boundary at r+gap/2).
         if bright {
             let (rr, gg, bb) = led_rgb(i);
             painter.circle_filled(
                 center,
-                r + 7.0,
-                Color32::from_rgba_unmultiplied(rr, gg, bb, 18),
-            );
-            painter.circle_filled(
-                center,
-                r + 3.5,
-                Color32::from_rgba_unmultiplied(rr, gg, bb, 40),
+                r + gap * 0.35, // stays well inside r+gap/2 boundary
+                Color32::from_rgba_unmultiplied(rr, gg, bb, 65),
             );
         }
 
@@ -469,7 +466,7 @@ fn help_ui(ui: &mut egui::Ui) {
                 ui,
                 "TMP",
                 "(Temperature)",
-                "At least one tyre has exceeded 105 °C (grip noticeably degrades above this).",
+                "At least one tyre has exceeded 110 °C (grip noticeably degrades above this).",
             );
             row(
                 ui,
@@ -605,6 +602,8 @@ pub(crate) struct ForzaTachoApp {
     overlay_close: Arc<AtomicBool>,
     shift_flash_active: bool,
     shift_flash_gear: i64,
+    // Shared app settings (updated by HTTP handler on save)
+    settings: Arc<Mutex<AppSettings>>,
 }
 
 impl ForzaTachoApp {
@@ -613,6 +612,7 @@ impl ForzaTachoApp {
         args: &Args,
         launcher_config: LauncherConfig,
         config_path: PathBuf,
+        settings: Arc<Mutex<AppSettings>>,
     ) -> Self {
         Self {
             hub,
@@ -628,14 +628,13 @@ impl ForzaTachoApp {
             overlay_close: Arc::new(AtomicBool::new(false)),
             shift_flash_active: false,
             shift_flash_gear: 0,
+            settings,
         }
     }
 }
 
 impl eframe::App for ForzaTachoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(Duration::from_millis(500));
-
         // Handle close request sent from inside the overlay's context menu.
         if self.overlay_close.load(Ordering::Relaxed) {
             self.show_overlay = false;
@@ -647,6 +646,35 @@ impl eframe::App for ForzaTachoApp {
         let age_ms = status["ageMs"].as_u64();
         let packets = status["packets"].as_u64().unwrap_or(0);
         let is_live = age_ms.map(|ms| ms < 2000).unwrap_or(false);
+
+        // Always compute LED/shift state so the audio trigger fires even when
+        // the overlay window is not shown.
+        {
+            let latest = self.hub.latest();
+            let time = ctx.input(|i| i.time);
+            let prev_flash = self.shift_flash_active;
+            let led = compute_led_state(
+                latest.as_ref(),
+                time,
+                &mut self.shift_flash_active,
+                &mut self.shift_flash_gear,
+            );
+            // false → true edge: fire the backend shift sound (if configured).
+            if !prev_flash && led.flash {
+                if let Ok(s) = self.settings.lock() {
+                    crate::audio::play_shift_sound(&s.shift_sound_backend);
+                }
+            }
+        }
+
+        // Repaint rate: fast when live and any feature needs it.
+        let needs_fast = is_live && {
+            self.show_overlay
+                || self.settings.lock()
+                    .map(|s| s.shift_sound_backend != "none")
+                    .unwrap_or(false)
+        };
+        ctx.request_repaint_after(Duration::from_millis(if needs_fast { 16 } else { 500 }));
 
         let demo_mode = self.demo_mode;
         let http_port = self.http_port;
@@ -898,6 +926,49 @@ impl eframe::App for ForzaTachoApp {
                             );
                         }
 
+                        // ── Shift sound (this device) ──────────────────────
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Shift sound").strong().small());
+                        ui.add_space(4.0);
+
+                        // Read current backend sound without holding the lock across UI.
+                        let mut snd_backend = {
+                            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+                            s.shift_sound_backend.clone()
+                        };
+                        let old_backend = snd_backend.clone();
+                        let sounds = crate::settings::SOUND_NAMES;
+                        let settings_file = self.config_path.with_file_name("settings.json");
+
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("snd_backend")
+                                .selected_text(&snd_backend)
+                                .width(100.0)
+                                .show_ui(ui, |ui| {
+                                    for &name in sounds {
+                                        ui.selectable_value(&mut snd_backend, name.to_string(), name);
+                                    }
+                                });
+                            if ui.small_button("▶ Test").clicked() {
+                                crate::audio::play_shift_sound(&snd_backend);
+                            }
+                        });
+
+                        if snd_backend != old_backend {
+                            let mut s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+                            s.shift_sound_backend = snd_backend.clone();
+                            let _ = crate::settings::save_settings(&settings_file, &s);
+                            crate::audio::play_shift_sound(&snd_backend);
+                        }
+
+                        ui.add_space(3.0);
+                        ui.label(
+                            RichText::new("Plays on this machine. Set web sound in the browser dashboard.")
+                                .small().weak(),
+                        );
+
                         // ── KDE Wayland tip ────────────────────────────────
                         ui.add_space(10.0);
                         ui.separator();
@@ -938,6 +1009,9 @@ impl eframe::App for ForzaTachoApp {
 
         // ── Overlay viewport (separate OS window) ─────────────────────────────
         if self.show_overlay {
+            // Re-read the current telemetry for a fresh render (compute_led_state
+            // was already called above for audio; calling it again is safe — the
+            // state machine is idempotent on the same packet).
             let latest = self.hub.latest();
             let time = ctx.input(|i| i.time);
             let led_state = compute_led_state(
@@ -977,6 +1051,7 @@ pub(crate) fn run(
     args: &Args,
     launcher_config: LauncherConfig,
     launcher_config_path: PathBuf,
+    settings: Arc<Mutex<AppSettings>>,
 ) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -995,6 +1070,7 @@ pub(crate) fn run(
                 &args,
                 launcher_config,
                 launcher_config_path,
+                settings,
             )))
         }),
     )

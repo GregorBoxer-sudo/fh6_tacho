@@ -1,14 +1,16 @@
 mod analytics;
+mod audio;
 mod config;
 mod gui;
 mod logging;
 mod packet;
 mod runtime;
+mod settings;
 mod shift;
 mod telemetry;
 mod util;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -17,6 +19,7 @@ use analytics::TelemetryRecorder;
 use config::{Args, LauncherConfig};
 use logging::ShiftCacheLogger;
 use runtime::{demo_loop, run_http, udp_loop};
+use settings::load_settings;
 use shift::PowerCurveStore;
 use telemetry::TelemetryHub;
 use util::lan_addresses;
@@ -73,6 +76,9 @@ fn main() -> Result<()> {
     let hub = Arc::new(TelemetryHub::new());
     let recorder = Arc::new(TelemetryRecorder::new(root.join("data/drive_sessions"))?);
 
+    // Shared settings — loaded once; updated in-place by the HTTP handler.
+    let app_settings = Arc::new(Mutex::new(load_settings(&root.join("data/settings.json"))));
+
     let use_gui = !args.no_gui && !is_headless();
 
     if use_gui {
@@ -84,9 +90,10 @@ fn main() -> Result<()> {
             hub,
             power_curves,
             recorder,
+            app_settings,
         )
     } else {
-        run_terminal(args, root, hub, power_curves, recorder)
+        run_terminal(args, root, hub, power_curves, recorder, app_settings)
     }
 }
 
@@ -102,6 +109,7 @@ fn run_with_gui(
     hub: Arc<TelemetryHub>,
     power_curves: Arc<PowerCurveStore>,
     recorder: Arc<TelemetryRecorder>,
+    app_settings: Arc<Mutex<settings::AppSettings>>,
 ) -> Result<()> {
     // Clone handles for the background thread.
     let hub_bg = hub.clone();
@@ -109,6 +117,7 @@ fn run_with_gui(
     let root_bg = root.clone();
     let power_curves_bg = power_curves.clone();
     let recorder_bg = recorder.clone();
+    let settings_bg = app_settings.clone();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -141,7 +150,7 @@ fn run_with_gui(
                 eprintln!("  http://{}:{}", address, args_bg.http_port);
             }
 
-            if let Err(e) = run_http(root_bg.join("data"), hub_bg, &args_bg)
+            if let Err(e) = run_http(root_bg.join("data"), hub_bg, &args_bg, settings_bg)
                 .await
                 .context("HTTP-Server")
             {
@@ -151,7 +160,7 @@ fn run_with_gui(
     });
 
     // egui/eframe must run on the main thread.
-    gui::run(hub, &args, launcher_config, launcher_config_path)
+    gui::run(hub, &args, launcher_config, launcher_config_path, app_settings)
 }
 
 // ─── Terminal mode ───────────────────────────────────────────────────────────
@@ -163,6 +172,7 @@ fn run_terminal(
     hub: Arc<TelemetryHub>,
     power_curves: Arc<PowerCurveStore>,
     recorder: Arc<TelemetryRecorder>,
+    app_settings: Arc<Mutex<settings::AppSettings>>,
 ) -> Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -193,7 +203,7 @@ fn run_terminal(
                 println!("  http://{}:{}", address, args.http_port);
             }
 
-            run_http(root.join("data"), hub, &args)
+            run_http(root.join("data"), hub, &args, app_settings)
                 .await
                 .context("HTTP-Server")
         })

@@ -50,12 +50,13 @@ async fn static_handler(uri: Uri) -> Response {
 use crate::util::{get_f64, now_seconds};
 use crate::{
     analytics::{
-        TelemetryRecorder, car_browser, car_power_curve, list_sessions, session_detail,
-        session_track,
+        TelemetryRecorder, car_browser, car_power_curve, list_sessions, session_csv,
+        session_detail, session_track,
     },
     config::Args,
     logging::PacketInspector,
     packet::parse_forza_dash,
+    settings::save_settings,
     shift::{PowerCurveStore, enrich_shift_data},
     telemetry::{AppState, TelemetryHub},
 };
@@ -273,6 +274,24 @@ async fn api_session_track(
     ))
 }
 
+async fn api_session_csv(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    match session_csv(&state.data_dir.join("drive_sessions"), &id) {
+        Some(csv) => {
+            let filename = format!("{id}.csv");
+            let disposition = format!("attachment; filename=\"{filename}\"");
+            Response::builder()
+                .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+                .header(header::CONTENT_DISPOSITION, disposition)
+                .body(Body::from(csv))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 async fn api_cars(State(state): State<AppState>) -> Json<Value> {
     Json(car_browser(
         &state.data_dir.join("power_curves.json"),
@@ -398,11 +417,70 @@ async fn api_save_map_calibration(
     }
 }
 
-pub(crate) async fn run_http(data_dir: PathBuf, hub: Arc<TelemetryHub>, args: &Args) -> Result<()> {
+// ── Settings ─────────────────────────────────────────────────────────────────
+
+async fn api_get_settings(State(state): State<AppState>) -> Json<Value> {
+    let s = state.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    Json(serde_json::to_value(&s).unwrap_or_else(|_| json!({ "unitSystem": "metric" })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetSettingsBody {
+    unit_system: Option<String>,
+    shift_sound_web: Option<String>,
+    shift_sound_backend: Option<String>,
+}
+
+async fn api_post_settings(
+    State(state): State<AppState>,
+    Json(body): Json<SetSettingsBody>,
+) -> Json<Value> {
+    use crate::settings::is_valid_sound;
+    let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(us) = body.unit_system {
+        if us == "metric" || us == "imperial" {
+            s.unit_system = us;
+        }
+    }
+    if let Some(snd) = body.shift_sound_web {
+        if is_valid_sound(&snd) {
+            s.shift_sound_web = snd;
+        }
+    }
+    if let Some(snd) = body.shift_sound_backend {
+        if is_valid_sound(&snd) {
+            s.shift_sound_backend = snd;
+        }
+    }
+    *state.settings.lock().unwrap_or_else(|e| e.into_inner()) = s.clone();
+    let _ = save_settings(&state.data_dir.join("settings.json"), &s);
+    Json(serde_json::to_value(&s).unwrap_or_else(|_| json!({ "unitSystem": "metric" })))
+}
+
+/// Plays a named sound on the backend device immediately — used by the settings
+/// UI to preview a sound when the dropdown selection changes.
+async fn api_preview_sound(
+    State(_state): State<AppState>,
+    Json(body): Json<Value>,
+) -> StatusCode {
+    if let Some(name) = body.get("sound").and_then(|v| v.as_str()) {
+        crate::audio::play_shift_sound(name);
+    }
+    StatusCode::NO_CONTENT
+}
+
+pub(crate) async fn run_http(
+    data_dir: PathBuf,
+    hub: Arc<TelemetryHub>,
+    args: &Args,
+    settings: Arc<std::sync::Mutex<crate::settings::AppSettings>>,
+) -> Result<()> {
     let state = AppState {
         hub,
         data_dir,
         debug_mode: args.debug,
+        settings,
     };
     let app = Router::new()
         .route("/events", get(events))
@@ -410,6 +488,7 @@ pub(crate) async fn run_http(data_dir: PathBuf, hub: Arc<TelemetryHub>, args: &A
         .route("/api/analytics/sessions", get(api_sessions))
         .route("/api/analytics/sessions/{id}", get(api_session))
         .route("/api/analytics/sessions/{id}/track", get(api_session_track))
+        .route("/api/analytics/sessions/{id}/csv", get(api_session_csv))
         .route("/api/analytics/cars", get(api_cars))
         .route(
             "/api/analytics/cars/{key}/powercurve",
@@ -419,6 +498,8 @@ pub(crate) async fn run_http(data_dir: PathBuf, hub: Arc<TelemetryHub>, args: &A
             "/api/map/calibration",
             get(api_map_calibration).post(api_save_map_calibration),
         )
+        .route("/api/settings", get(api_get_settings).post(api_post_settings))
+        .route("/api/shift-sound/preview", axum::routing::post(api_preview_sound))
         .fallback(static_handler)
         .with_state(state);
     let addr: SocketAddr = format!("{}:{}", args.http_host, args.http_port)

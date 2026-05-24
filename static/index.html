@@ -12,6 +12,7 @@
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="apple-touch-icon" href="/icon.svg">
     <link rel="stylesheet" href="/style.css">
+    <script src="/settings.js"></script>
   </head>
   <body>
     <main class="stage">
@@ -21,8 +22,17 @@
         <span id="latency">-- ms</span>
         <nav class="statusNav">
           <a class="topLink" href="/analytics.html">Analytics</a>
+          <button id="unitToggle" type="button" class="topLink unitToggleBtn">km/h</button>
+          <button id="settingsBtn" type="button" class="topLink" title="Settings">⚙</button>
         </nav>
       </section>
+      <div id="settingsPanel" class="settingsPanel" hidden>
+        <div class="settingsRow">
+          <span class="settingsLabel">Shift sound</span>
+          <select id="snd_web" class="settingsSel"></select>
+        </div>
+        <p class="settingsHint">Plays in this browser. Set backend sound in the app.</p>
+      </div>
 
       <section class="display">
         <div class="slipLeds slipFL" data-wheel="FL" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
@@ -68,7 +78,7 @@
               <small id="driftPeak">0p</small>
               <strong id="driftAngle">0 deg</strong>
             </div>
-            <div class="speed"><span id="speed">0</span><small>km/h</small></div>
+            <div class="speed"><span id="speed">0</span><small id="speedUnit">km/h</small></div>
             <div class="gear" id="gear">0</div>
             <div class="rpmText"><span id="rpm">0</span><span id="rpmMax">/ 0 rpm</span></div>
             <div class="rpmTrack" aria-hidden="true"><div class="rpmFill" id="rpmFill"></div></div>
@@ -106,5 +116,6 @@
       </section>
     </main>
     <script src="/app.js"></script>
+
   </body>
 </html>

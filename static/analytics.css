@@ -194,6 +194,32 @@
   color: #55e8ff;
 }
 
+.chartFilters {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 6px 10px 0;
+}
+
+.chartFilters[hidden] { display: none; }
+
+.chartFilters label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+}
+
+.chartFilters input[type="checkbox"] {
+  accent-color: #55e8ff;
+  cursor: pointer;
+}
+
 #sessionChart {
   display: block;
   width: calc(100% - 20px);
@@ -425,6 +451,85 @@
   color: var(--muted);
   font-size: 12px;
 }
+
+/* ── Race badge ── */
+.raceTag {
+  display: inline-grid;
+  place-items: center;
+  height: 15px;
+  padding: 0 5px;
+  border-radius: 2px;
+  background: #0e1f0b;
+  border: 1px solid #3a7a1e66;
+  color: #5fd45f;
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+/* ── Race lap-times detail panel ── */
+.raceDetail {
+  padding: 0 10px 12px;
+}
+
+.raceDetailHead {
+  padding: 4px 0 8px;
+  color: var(--label);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.lapGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
+  gap: 3px;
+}
+
+.lapRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255,255,255,.06);
+  background: #0c1113;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.lapRow.lapBest {
+  border-color: #3a7a1e66;
+  background: #0c160a;
+}
+
+.lapRow.lapBest .lapTime {
+  color: #5fd45f;
+}
+
+.lapNum {
+  color: var(--muted);
+  font-size: 11px;
+  min-width: 38px;
+}
+
+.lapTime {
+  flex: 1;
+  text-align: center;
+}
+
+.lapDelta {
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 48px;
+  text-align: right;
+}
+
+.lapDelta.lapSlower { color: #e05e5e; }
+.lapDelta.lapBestMark { color: #5fd45f; font-weight: 700; }
 
 @media (max-width: 1100px) {
   .analyticsGrid {

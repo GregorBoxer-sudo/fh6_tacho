@@ -10,6 +10,8 @@ pub(crate) struct AppState {
     pub(crate) hub: Arc<TelemetryHub>,
     pub(crate) data_dir: PathBuf,
     pub(crate) debug_mode: bool,
+    /// Shared settings — updated by HTTP POST, read by GUI overlay and audio.
+    pub(crate) settings: Arc<Mutex<crate::settings::AppSettings>>,
 }
 
 pub(crate) struct TelemetryHub {

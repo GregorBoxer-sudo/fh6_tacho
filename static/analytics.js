@@ -12,12 +12,15 @@ let activeCarChart  = "shifts"; // "shifts" | "power"
 let detailTrack     = [];
 let detailTrackSrc  = "";
 let detailSamples   = [];
+let detailSummary   = null;   // cached for re-render on unit toggle
 let mapColorMode    = "plain";
 let mapCalibration  = { points: [], worldFlipX: false, worldFlipZ: false, mapImage: "map.jpg" };
 let mapImage        = null;
 let mapImageLoaded  = false;
 let mapImageProcessed = null;
 let mapDebugMode    = false;
+let chartFilters    = { speed: true, rpm: true, accel: true, brake: true, gLat: false, gLong: false, drift: false };
+let chartHoverIndex = -1;
 let mapPendingWorld = null;
 let mapLivePosition = null;
 let mapLiveSource   = null;
@@ -29,7 +32,9 @@ let replayIndex = 0;
 let replayPlaying = false;
 let replayRaf = 0;
 let replayLastFrame = 0;
-let replayAccumulator = 0;
+let replayAccumulator = 0; // accumulated session-time ms for timestamp-based replay
+let chartView       = { startFrac: 0, endFrac: 1 };   // visible window [0,1] fractions
+let chartDrag       = { active: false, moved: false, startX: 0, startStart: 0, spanFrac: 1 };
 let detailMapView   = {
   scale: 1,
   tx: 0,
@@ -93,27 +98,40 @@ function updateReplayUi() {
 
 function setReplayIndex(index) {
   replayIndex = clamp(Math.round(index), 0, Math.max(0, detailSamples.length - 1));
+  if (replayPlaying) ensureReplayVisible();
   updateReplayUi();
   drawSessionChart(detailSamples);
   scheduleDetailMapDraw();
 }
 
+// Timestamp-based replay: advances by real session-time elapsed × speed factor.
+// Uses sample.t (seconds since session start) so playback is frame-rate independent
+// and true-to-life at 1× speed regardless of how many samples there are.
 function replayStep(now) {
   if (!replayPlaying) return;
-  if (!replayLastFrame) replayLastFrame = now;
-  const speed = Number($("replaySpeed")?.value) || 1;
-  const elapsed = Math.min(100, now - replayLastFrame);
-  replayLastFrame = now;
-  replayAccumulator += elapsed * speed * 0.02;
-  if (replayAccumulator >= 1) {
-    const advance = Math.floor(replayAccumulator);
-    replayAccumulator -= advance;
-    setReplayIndex(replayIndex + advance);
-    if (replayIndex >= detailSamples.length - 1) {
-      stopReplay();
-      return;
-    }
+  if (!replayLastFrame) {
+    replayLastFrame = now;
+    replayRaf = requestAnimationFrame(replayStep);
+    return;
   }
+  const speed = Number($("replaySpeed")?.value) || 1;
+  // Cap frame delta at 100 ms so an invisible tab doesn't jump huge distances on resume.
+  const wallElapsed = Math.min(100, now - replayLastFrame);
+  replayLastFrame = now;
+  // Accumulate session-time milliseconds.
+  replayAccumulator += wallElapsed * speed;
+
+  let idx = replayIndex;
+  while (idx < detailSamples.length - 1) {
+    const curT  = (detailSamples[idx]?.t     ?? 0) * 1000;
+    const nextT = (detailSamples[idx + 1]?.t ?? 0) * 1000;
+    const gap   = Math.max(1, nextT - curT);
+    if (replayAccumulator < gap) break;
+    replayAccumulator -= gap;
+    idx++;
+  }
+  if (idx !== replayIndex) setReplayIndex(idx);
+  if (replayIndex >= detailSamples.length - 1) { stopReplay(); return; }
   replayRaf = requestAnimationFrame(replayStep);
 }
 
@@ -212,7 +230,7 @@ async function refresh() {
 function renderOverview() {
   $("sessionCount").textContent = sessions.length;
   $("carCount").textContent     = cars.length;
-  $("topSpeed").textContent     = `${num(Math.max(0, ...sessions.map((s) => s.maxSpeed || 0)))} km/h`;
+  $("topSpeed").textContent     = conv.fmtSpeed(Math.max(0, ...sessions.map((s) => s.maxSpeed || 0)));
   $("topG").textContent         = `${num(Math.max(0, ...sessions.map((s) => s.maxAbsG  || 0)), 2)}g`;
   $("topPureLatG").textContent  = `${num(Math.max(0, ...sessions.map((s) => s.maxPureLatG || 0)), 2)}g`;
 }
@@ -220,13 +238,19 @@ function renderOverview() {
 // ── Session List ────────────────────────────────────────────────────────────
 
 function renderSessions() {
-  $("sessionList").innerHTML = sessions.map((s) => `
+  $("sessionList").innerHTML = sessions.map((s) => {
+    const raceTag = s.isRace ? `<span class="raceTag">Race</span>` : "";
+    const lapNote = s.isRace && (s.lapTimes || []).length
+      ? ` · ${s.lapTimes.length} laps` : "";
+    const posNote = s.isRace && s.finishPosition > 0
+      ? ` · P${s.finishPosition}` : "";
+    return `
     <button class="item ${s.id === selectedSession ? "active" : ""}" data-session="${s.id}">
-      <strong>${s.carKey || "Unknown"} · ${timeText(s.duration)}</strong>
+      <strong>${raceTag}${s.carKey || "Unknown"} · ${timeText(s.duration)}</strong>
       <small>${new Date((s.startedAt || 0) * 1000).toLocaleString()}</small>
-      <em>${num(s.maxSpeed)} km/h · ${num(s.maxRpm)} rpm · ${num(s.maxAbsG, 2)}g · ${s.shiftCount || 0} shifts</em>
+      <em>${conv.fmtSpeed(s.maxSpeed)} · ${num(s.maxRpm)} rpm · ${num(s.maxAbsG, 2)}g · ${s.shiftCount || 0} shifts${lapNote}${posNote}</em>
     </button>
-  `).join("");
+  `}).join("");
   document.querySelectorAll("[data-session]").forEach((btn) =>
     btn.addEventListener("click", () => selectSession(btn.dataset.session))
   );
@@ -244,7 +268,7 @@ function renderCars() {
       <button class="item ${car.key === selectedCar ? "active" : ""}" data-car="${car.key}">
         <strong>${car.key} · ${car.class || "-"} ${car.pi || ""}</strong>
         <small>${car.drivetrain || "-"} · ${car.cylinders || 0} cyl. · ${car.sessions || 0} sessions</small>
-        <em>${num(car.maxSpeed)} km/h · ${num(car.maxPower)} hp · ${num(car.observedRpm)} rpm</em>
+        <em>${conv.fmtSpeed(car.maxSpeed)} · ${num(car.maxPower)} hp · ${num(car.observedRpm)} rpm</em>
         <em>${shifts || "no shift points yet"}</em>
       </button>
     `;
@@ -263,7 +287,9 @@ async function selectSession(id) {
   renderSessions();
   renderCars();
   $("chartTabs").style.display = "none";
+  $("chartFilters").hidden = false;
   $("detailMapSection").style.display = "";
+  resetChartView();
   configureReplayControls(true);
   const [detail, trackData] = await Promise.all([
     loadJson(`/api/analytics/sessions/${encodeURIComponent(id)}`),
@@ -289,7 +315,10 @@ async function selectCar(key) {
   activeCarChart = "shifts";
   setActiveTab("shifts");
   $("chartTabs").style.display = "";
+  $("chartFilters").hidden = true;
   $("detailMapSection").style.display = "none";
+  const rd = $("raceDetail"); if (rd) rd.hidden = true;
+  const csvB = $("csvDownloadBtn"); if (csvB) csvB.hidden = true;
   configureReplayControls(false);
 
   // Show detail immediately, curve loads in parallel
@@ -322,33 +351,89 @@ document.querySelectorAll(".chartTab").forEach((btn) => {
 
 function renderDetail(summary, samples) {
   detailSamples = Array.isArray(samples) ? samples : [];
+  detailSummary = summary || {};
   replayIndex = 0;
-  $("detailTitle").textContent = `${summary.carKey || "Session"} · ${timeText(summary.duration)}`;
-  const stats = [
-    ["Top Speed", `${num(summary.maxSpeed)} km/h`],
-    ["Max RPM",   `${num(summary.maxRpm)} rpm`],
-    ["Power",     `${num(summary.maxPower)} hp`],
-    ["Torque",    `${num(summary.maxTorque)} Nm`],
-    ["Boost",     `${num(summary.maxBoost, 2)}`],
-    ["Max G",     `${num(summary.maxAbsG, 2)}g`],
-    ["Pure Lat G",`${num(summary.maxPureLatG, 2)}g`],
-    ["Drift",     `${num(summary.maxDrift)} deg`],
-    ["Shifts",    `${summary.shiftCount || 0}`],
-  ];
+  resetChartView();
+
+  const isRace = !!summary.isRace;
+  const titleTag = isRace ? `<span class="raceTag">Race</span> ` : "";
+  $("detailTitle").innerHTML = `${titleTag}${summary.carKey || "Session"} · ${timeText(summary.duration)}`;
+
+  const stats = [];
+  // Race-specific stats come first when this is a race session
+  if (isRace) {
+    stats.push(["Finish Pos.", summary.finishPosition > 0 ? `P${summary.finishPosition}` : "–"]);
+    stats.push(["Best Lap",    summary.bestLap ? timeText(summary.bestLap) : "–"]);
+    stats.push(["Laps",        (summary.lapTimes || []).length > 0
+      ? String((summary.lapTimes || []).length) : "–"]);
+  }
+  stats.push(["Top Speed", conv.fmtSpeed(summary.maxSpeed)]);
+  stats.push(["Max RPM",   `${num(summary.maxRpm)} rpm`]);
+  stats.push(["Power",     `${num(summary.maxPower)} hp`]);
+  stats.push(["Torque",    conv.fmtTorque(summary.maxTorque)]);
+  stats.push(["Max G",     `${num(summary.maxAbsG, 2)}g`]);
+  stats.push(["Pure Lat G",`${num(summary.maxPureLatG, 2)}g`]);
+  stats.push(["Max Drift", `${num(summary.maxDrift, 1)}°`]);
+  stats.push(["Shifts",    `${summary.shiftCount || 0}`]);
+
   $("detailStats").innerHTML = stats.map(([l, v]) =>
     `<div class="stat"><span>${l}</span><strong>${v}</strong></div>`
   ).join("");
   $("lapInfo").innerHTML = `
     <span>Class ${summary.class || "-"}</span>
     <span>${summary.drivetrain || "-"}</span>
-    <span>${summary.cylinders || 0} cylinders</span>
+    <span>${summary.cylinders || 0} cyl.</span>
     <span>Ø Throttle ${num((summary.avgThrottle || 0) * 100)}%</span>
     <span>Ø Brake ${num((summary.avgBrake || 0) * 100)}%</span>
-    <span>Best Lap ${summary.bestLap ? timeText(summary.bestLap) : "--"}</span>
+    ${!isRace ? `<span>Best Lap ${summary.bestLap ? timeText(summary.bestLap) : "--"}</span>` : ""}
     <span>Track Src ${detailTrackSrc || "-"}</span>
   `;
+  renderRaceDetail(summary);
+  // CSV download button
+  const csvBtn = $("csvDownloadBtn");
+  if (csvBtn) {
+    const safeId = encodeURIComponent(summary.id || selectedSession);
+    csvBtn.href     = `/api/analytics/sessions/${safeId}/csv`;
+    csvBtn.download = `${(summary.carKey || "session").replace(/[:/]/g, "_")}_${safeId}.csv`;
+    csvBtn.hidden   = false;
+  }
   updateReplayUi();
   drawSessionChart(detailSamples);
+}
+
+// ── Race Detail (lap times + race stats) ─────────────────────────────────────
+
+function renderRaceDetail(summary) {
+  const el = $("raceDetail");
+  if (!el) return;
+  const laps = summary?.lapTimes || [];
+  if (!summary?.isRace || !laps.length) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  const best = Math.min(...laps);
+  const rows = laps.map((t, i) => {
+    const delta  = t - best;
+    const isBest = delta < 0.001;
+    const sign   = delta >= 0 ? "+" : "";
+    const dText  = isBest ? "BEST" : `${sign}${delta.toFixed(3)}s`;
+    const dClass = isBest ? "lapBestMark" : (delta > 0 ? "lapSlower" : "");
+    return `<div class="lapRow${isBest ? " lapBest" : ""}">
+      <span class="lapNum">Lap ${i + 1}</span>
+      <span class="lapTime">${timeText(t)}</span>
+      <span class="lapDelta ${dClass}">${dText}</span>
+    </div>`;
+  }).join("");
+
+  const posLine = summary.finishPosition > 0
+    ? `<span>Finish: <strong>P${summary.finishPosition}</strong></span>  ` : "";
+  const lapsLine = `<span>${laps.length} completed lap${laps.length !== 1 ? "s" : ""}</span>`;
+
+  el.innerHTML = `
+    <div class="raceDetailHead">${posLine}${lapsLine}</div>
+    <div class="lapGrid">${rows}</div>
+  `;
 }
 
 // ── Car Detail ───────────────────────────────────────────────────────────────
@@ -356,7 +441,7 @@ function renderDetail(summary, samples) {
 function renderCarDetail(car) {
   $("detailTitle").textContent = `${car.key} · ${car.class || "-"} ${car.pi ? "PI " + car.pi : ""}`;
   const stats = [
-    ["Top Speed", `${num(car.maxSpeed)} km/h`],
+    ["Top Speed", conv.fmtSpeed(car.maxSpeed)],
     ["Max Power", `${num(car.maxPower)} hp`],
     ["Obs. RPM",  `${num(car.observedRpm)} rpm`],
     ["Sessions",  `${car.sessions || 0}`],
@@ -446,7 +531,109 @@ function prepareSessionChartCanvas() {
   return { ctx, w, h };
 }
 
+// ── Rounded-rect path helper (Canvas roundRect fallback) ────────────────────
+
+function roundRect(ctx, x, y, w, h, r) {
+  if (typeof ctx.roundRect === "function") {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+}
+
+// ── Chart zoom/pan helpers ───────────────────────────────────────────────────
+
+function resetChartView() {
+  chartView = { startFrac: 0, endFrac: 1 };
+}
+
+// Returns { start, end } index range of the currently visible window.
+function getChartBounds(samples) {
+  if (samples.length < 2) return { start: 0, end: Math.max(0, samples.length - 1) };
+  const n = samples.length;
+  const start = clamp(Math.floor(chartView.startFrac * (n - 1)), 0, n - 2);
+  const end   = clamp(Math.ceil(chartView.endFrac   * (n - 1)), start + 1, n - 1);
+  return { start, end };
+}
+
+// Auto-scrolls the chart window to keep replayIndex visible (called during playback).
+function ensureReplayVisible() {
+  if (!detailSamples.length) return;
+  const n = detailSamples.length;
+  if (n < 2) return;
+  const span = chartView.endFrac - chartView.startFrac;
+  if (span >= 0.999) return; // fully zoomed out — nothing to scroll
+  const idxFrac = replayIndex / (n - 1);
+  const margin  = span * 0.06;
+  // Only scroll when the cursor approaches or passes the edges
+  if (idxFrac >= chartView.startFrac + margin && idxFrac <= chartView.endFrac - margin) return;
+  const half = span * 0.5;
+  chartView.startFrac = clamp(idxFrac - half, 0, 1 - span);
+  chartView.endFrac   = chartView.startFrac + span;
+}
+
 // ── Session Progress Chart ───────────────────────────────────────────────────
+
+// fn:       transform raw sample value before plotting/display
+// fixedMax: use this as the Y-axis ceiling instead of computing from data
+const CHART_SERIES = [
+  { key: "speed", color: "#55e8ff", label: "Speed",    fn: (v) => v },
+  { key: "rpm",   color: "#f3df4e", label: "RPM",      fn: (v) => v },
+  { key: "accel", color: "#26f06e", label: "Throttle", fn: (v) => v,              fixedMax: 1  },
+  { key: "brake", color: "#ff3658", label: "Brake",    fn: (v) => v,              fixedMax: 1  },
+  { key: "gLat",  color: "#ff9a34", label: "|G-Lat|",  fn: (v) => Math.abs(v),   fixedMax: 2  },
+  { key: "gLong", color: "#d84dff", label: "|G-Long|", fn: (v) => Math.abs(v),   fixedMax: 2  },
+  { key: "drift", color: "#4ff0d8", label: "Drift°",   fn: (v) => Math.abs(v),   fixedMax: 45 },
+];
+
+function seriesMax(samples, series) {
+  if (series.fixedMax !== undefined) return series.fixedMax;
+  if (!samples.length) return 1;
+  const fn = series.fn || ((v) => v);
+  return Math.max(1, ...samples.map((s) => fn(s[series.key] ?? 0)));
+}
+
+function seriesValueText(series, sample) {
+  const fn  = series.fn || ((v) => v);
+  const raw = fn(sample[series.key] ?? 0);
+  switch (series.key) {
+    // raw value here is already in km/h (fn = identity for speed); apply conv for display
+    case "speed": return `${num(conv.speed(raw))} ${conv.speedLabel()}`;
+    case "rpm":   return `${num(raw)} rpm`;
+    case "gLat":
+    case "gLong": return `${num(raw, 2)}g`;
+    case "drift": return `${num(raw, 1)}°`;
+    default:      return `${num(raw * 100)}%`;
+  }
+}
+
+// Returns a CHART_SERIES entry with unit conversion baked into fn so the Y-axis
+// scales in the display unit (e.g. mph instead of km/h when imperial).
+function resolveSeriesForDisplay(s) {
+  if (s.key === "speed") {
+    return {
+      ...s,
+      fn:       (v) => conv.speed(s.fn ? s.fn(v) : v),
+      fixedMax: undefined,  // recompute from data in display units
+    };
+  }
+  return s;
+}
+
+function sampleY(val, max, h) {
+  return h - Math.max(0, Math.min(1, val / max)) * (h - 28) - 8;
+}
 
 function drawSessionChart(samples) {
   const { ctx, w, h } = prepareSessionChartCanvas();
@@ -455,19 +642,24 @@ function drawSessionChart(samples) {
   ctx.fillRect(0, 0, w, h);
   if (!samples.length) return;
 
-  drawSeries(ctx, samples, "speed", "#55e8ff", w, h, Math.max(1, ...samples.map((s) => s.speed || 0)));
-  drawSeries(ctx, samples, "rpm",   "#f3df4e", w, h, Math.max(1, ...samples.map((s) => s.rpm   || 0)));
-  drawSeries(ctx, samples, "brake", "#ff3658", w, h, 1);
-  drawSeries(ctx, samples, "accel", "#26f06e", w, h, 1);
+  const { start, end } = getChartBounds(samples);
+  const slice = samples.slice(start, end + 1);
+  if (slice.length < 2) return;
 
-  legendItem(ctx,  12, 18, "#55e8ff", "Speed");
-  legendItem(ctx,  82, 18, "#f3df4e", "RPM");
-  legendItem(ctx, 142, 18, "#26f06e", "Throttle");
-  legendItem(ctx, 197, 18, "#ff3658", "Brake");
+  const activeSeries = CHART_SERIES.filter((s) => chartFilters[s.key]).map(resolveSeriesForDisplay);
 
-  if (samples.length > 1) {
-    const idx = clamp(replayIndex, 0, samples.length - 1);
-    const x = (idx / (samples.length - 1)) * w;
+  // Draw series lines on the visible slice
+  let legendX = 12;
+  for (const s of activeSeries) {
+    drawSeries(ctx, slice, s, w, h, seriesMax(slice, s));
+    legendItem(ctx, legendX, 18, s.color, s.label);
+    legendX += 78;
+  }
+
+  // Replay cursor — only when inside the visible window
+  if (slice.length > 1 && replayIndex >= start && replayIndex <= end) {
+    const localIdx = replayIndex - start;
+    const x = (localIdx / (slice.length - 1)) * w;
     ctx.strokeStyle = "#ff3ea5";
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -479,17 +671,98 @@ function drawSessionChart(samples) {
     ctx.arc(x, 14, 4, 0, Math.PI * 2);
     ctx.fill();
   }
+
+  // Hover tooltip + crosshair
+  if (chartHoverIndex >= start && chartHoverIndex <= end && slice.length > 1) {
+    const sample   = samples[chartHoverIndex];
+    const localIdx = chartHoverIndex - start;
+    const hx       = (localIdx / (slice.length - 1)) * w;
+
+    // Crosshair line
+    ctx.strokeStyle = "rgba(255,255,255,0.14)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(hx, 22);
+    ctx.lineTo(hx, h);
+    ctx.stroke();
+
+    // Dots on each visible series at the hover position
+    for (const sr of activeSeries) {
+      const fn  = sr.fn || ((v) => v);
+      const max = seriesMax(slice, sr);
+      const yd  = sampleY(fn(sample[sr.key] ?? 0), max, h);
+      ctx.fillStyle = sr.color;
+      ctx.beginPath();
+      ctx.arc(hx, yd, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Tooltip box
+    const lines = [{ label: "t", value: timeText(sample.t || 0), color: "#c0d4dc" }];
+    for (const sr of activeSeries) {
+      lines.push({ label: sr.label, value: seriesValueText(sr, sample), color: sr.color });
+    }
+    if (sample.gear !== undefined) lines.push({ label: "Gear", value: String(sample.gear || 0), color: "#9aaeb8" });
+
+    const lh  = 16;
+    const pad = 8;
+    const bw  = 150;
+    const bh  = lines.length * lh + pad * 2;
+    let bx = hx + 12;
+    if (bx + bw > w - 4) bx = hx - bw - 12;
+    const by = Math.max(22, Math.min(h - bh - 4, 36));
+
+    ctx.fillStyle = "rgba(4, 7, 11, 0.92)";
+    ctx.strokeStyle = "rgba(192, 212, 220, 0.16)";
+    ctx.lineWidth = 1;
+    roundRect(ctx, bx, by, bw, bh, 4);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = "11px sans-serif";
+    lines.forEach(({ label, value, color }, i) => {
+      const ty = by + pad + (i + 1) * lh - 1;
+      ctx.fillStyle = "rgba(150, 178, 188, 0.6)";
+      ctx.textAlign = "left";
+      ctx.fillText(label, bx + pad, ty);
+      ctx.fillStyle = color;
+      ctx.textAlign = "right";
+      ctx.fillText(value, bx + bw - pad, ty);
+    });
+    ctx.textAlign = "left";
+  }
+
+  // Zoom scroll indicator bar at the bottom (only visible when zoomed in)
+  const span = chartView.endFrac - chartView.startFrac;
+  if (span < 0.999) {
+    const barH = 3;
+    const barY = h - barH;
+    ctx.fillStyle = "rgba(255,255,255,0.07)";
+    ctx.fillRect(0, barY, w, barH);
+    ctx.fillStyle = "rgba(85, 232, 255, 0.45)";
+    ctx.fillRect(chartView.startFrac * w, barY, span * w, barH);
+  }
 }
 
-function drawSeries(ctx, samples, key, color, w, h, max) {
+// Smooth line through the visible slice using midpoint quadratic Bézier curves.
+// series: full CHART_SERIES entry (has .key, .color, .fn)
+function drawSeries(ctx, samples, series, w, h, max) {
+  if (samples.length < 2) return;
+  const fn  = series.fn || ((v) => v);
+  const pts = samples.map((s, i) => ({
+    x: (i / (samples.length - 1)) * w,
+    y: sampleY(fn(s[series.key] ?? 0), max, h),
+  }));
   ctx.beginPath();
-  ctx.strokeStyle = color;
-  ctx.lineWidth   = key === "rpm" ? 1.3 : 1.8;
-  samples.forEach((s, i) => {
-    const x = samples.length > 1 ? (i / (samples.length - 1)) * w : 0;
-    const y = h - Math.max(0, Math.min(1, (s[key] || 0) / max)) * (h - 28) - 8;
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  });
+  ctx.strokeStyle = series.color;
+  ctx.lineWidth = series.key === "rpm" ? 1.3 : 1.8;
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length - 1; i++) {
+    const mx = (pts[i].x + pts[i + 1].x) * 0.5;
+    const my = (pts[i].y + pts[i + 1].y) * 0.5;
+    ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+  }
+  ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
   ctx.stroke();
 }
 
@@ -878,7 +1151,7 @@ function ensureDetailMapImage() {
     processed.width = mapImage.width;
     processed.height = mapImage.height;
     const pctx = processed.getContext("2d");
-    pctx.filter = "saturate(0.72) contrast(0.94)";
+    pctx.filter = "saturate(0.55) contrast(0.90)";
     pctx.drawImage(mapImage, 0, 0);
     pctx.filter = "none";
     mapImageProcessed = processed;
@@ -1309,6 +1582,90 @@ function bindDetailMapInteraction() {
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 
+// ── Chart interaction (hover, drag-to-pan, wheel zoom) ───────────────────────
+
+// Wheel zoom: scroll up/down to zoom in/out around the cursor position.
+$("sessionChart").addEventListener("wheel", (event) => {
+  if (!detailSamples.length || selectedCar) return;
+  event.preventDefault();
+  const canvas = $("sessionChart");
+  const rect   = canvas.getBoundingClientRect();
+  const xFrac  = clamp(event.clientX - rect.left, 0, rect.width) / rect.width;
+
+  const span   = chartView.endFrac - chartView.startFrac;
+  const center = chartView.startFrac + xFrac * span;
+  const delta  = Math.max(-300, Math.min(300, event.deltaY));
+  const factor = Math.exp(delta * 0.0012);
+  const newSpan = clamp(span * factor, 0.02, 1);
+
+  chartView.startFrac = clamp(center - xFrac * newSpan, 0, 1 - newSpan);
+  chartView.endFrac   = chartView.startFrac + newSpan;
+  drawSessionChart(detailSamples);
+}, { passive: false });
+
+// Drag-to-pan: hold + drag left/right when zoomed in.
+$("sessionChart").addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || selectedCar) return;
+  const span = chartView.endFrac - chartView.startFrac;
+  chartDrag.active     = true;
+  chartDrag.moved      = false;
+  chartDrag.startX     = event.clientX;
+  chartDrag.startStart = chartView.startFrac;
+  chartDrag.spanFrac   = span;
+  $("sessionChart").setPointerCapture(event.pointerId);
+});
+
+$("sessionChart").addEventListener("pointermove", (event) => {
+  const canvas = $("sessionChart");
+  const rect   = canvas.getBoundingClientRect();
+
+  // Pan while dragging (only when actually zoomed in)
+  if (chartDrag.active && chartDrag.spanFrac < 0.999) {
+    const dx = event.clientX - chartDrag.startX;
+    if (Math.abs(dx) > 3) chartDrag.moved = true;
+    const dFrac = -(dx / rect.width) * chartDrag.spanFrac;
+    chartView.startFrac = clamp(chartDrag.startStart + dFrac, 0, 1 - chartDrag.spanFrac);
+    chartView.endFrac   = chartView.startFrac + chartDrag.spanFrac;
+    drawSessionChart(detailSamples);
+    return; // skip hover update during drag
+  }
+
+  // Hover crosshair
+  if (!detailSamples.length || selectedCar) { chartHoverIndex = -1; return; }
+  const x = clamp(event.clientX - rect.left, 0, rect.width);
+  const { start, end } = getChartBounds(detailSamples);
+  const visLen  = end - start + 1;
+  const localIdx = clamp(Math.round((x / rect.width) * (visLen - 1)), 0, visLen - 1);
+  const next = start + localIdx;
+  if (next === chartHoverIndex) return;
+  chartHoverIndex = next;
+  drawSessionChart(detailSamples);
+});
+
+$("sessionChart").addEventListener("pointerup", () => {
+  chartDrag.active = false;
+});
+
+$("sessionChart").addEventListener("mouseleave", () => {
+  chartDrag.active = false;
+  if (chartHoverIndex < 0) return;
+  chartHoverIndex = -1;
+  if (detailSamples.length) drawSessionChart(detailSamples);
+});
+
+// ── Chart series filters ─────────────────────────────────────────────────────
+
+["speed", "rpm", "accel", "brake", "gLat", "gLong", "drift"].forEach((key) => {
+  const cb = $(`filter_${key}`);
+  if (!cb) return;
+  cb.addEventListener("change", () => {
+    chartFilters[key] = cb.checked;
+    drawSessionChart(detailSamples);
+  });
+});
+
+// ── Misc ──────────────────────────────────────────────────────────────────────
+
 $("refreshBtn").addEventListener("click", refresh);
 const savedMapColor = localStorage.getItem(DETAIL_MAP_COLOR_KEY);
 if (DETAIL_MAP_COLOR_MODES.includes(savedMapColor)) {
@@ -1402,4 +1759,15 @@ window.addEventListener("beforeunload", () => {
 toggleCalibrationPane();
 renderPendingPoint();
 updateCalibrationDerivedState();
-refresh();
+
+$("unitToggle")?.addEventListener("click", async () => {
+  await saveUnitSettings(unitSystem === "metric" ? "imperial" : "metric");
+  syncUnitToggleBtns();
+  renderOverview();
+  renderSessions();
+  renderCars();
+  if (selectedSession && detailSummary) renderDetail(detailSummary, detailSamples);
+  else if (selectedCar && currentCar) renderCarDetail(currentCar);
+});
+
+loadUnitSettings().then(() => { syncUnitToggleBtns(); refresh(); });
