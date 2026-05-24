@@ -35,6 +35,7 @@ let replayLastFrame = 0;
 let replayAccumulator = 0; // accumulated session-time ms for timestamp-based replay
 let chartView       = { startFrac: 0, endFrac: 1 };   // visible window [0,1] fractions
 let chartDrag       = { active: false, moved: false, startX: 0, startStart: 0, spanFrac: 1 };
+let detailMapPointers = new Map();
 let detailMapView   = {
   scale: 1,
   tx: 0,
@@ -43,10 +44,15 @@ let detailMapView   = {
   pointer: {
     down: false,
     moved: false,
+    mode: "none",
     startX: 0,
     startY: 0,
     startTx: 0,
     startTy: 0,
+    startScale: 1,
+    startDistance: 1,
+    startImageX: 0,
+    startImageY: 0,
   },
 };
 
@@ -1168,6 +1174,27 @@ function detailMapCanvasPosition(event, canvas) {
   return { sx, sy };
 }
 
+function detailMapClientPosition(point, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    sx: point.clientX - rect.left,
+    sy: point.clientY - rect.top,
+  };
+}
+
+function detailMapDistance(a, b) {
+  return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+}
+
+function detailMapMidpoint(a, b, canvas) {
+  const pa = detailMapClientPosition(a, canvas);
+  const pb = detailMapClientPosition(b, canvas);
+  return {
+    sx: (pa.sx + pb.sx) * 0.5,
+    sy: (pa.sy + pb.sy) * 0.5,
+  };
+}
+
 function ensureDetailMapCanvasSize() {
   const canvas = $("detailMapCanvas");
   const rect = canvas.getBoundingClientRect();
@@ -1524,6 +1551,64 @@ function onDetailMapClick(event) {
 function bindDetailMapInteraction() {
   const canvas = $("detailMapCanvas");
   const wrap = $("detailMapWrap");
+  const touchOptions = { passive: false };
+
+  const mapPointerValues = () => Array.from(detailMapPointers.values());
+  const firstMapPointer = () => mapPointerValues()[0] || null;
+  const preventBrowserTouch = (event) => {
+    if (event.cancelable) event.preventDefault();
+  };
+  const capturePointer = (event) => {
+    try {
+      canvas.setPointerCapture(event.pointerId);
+    } catch (_) {
+      // Safari can throw if the pointer was already cancelled.
+    }
+  };
+  const releasePointer = (event) => {
+    try {
+      canvas.releasePointerCapture(event.pointerId);
+    } catch (_) {
+      // Pointer may already be released by the browser.
+    }
+  };
+  const startMapPan = (point) => {
+    if (!point) return;
+    detailMapView.pointer.down = true;
+    detailMapView.pointer.mode = "pan";
+    detailMapView.pointer.moved = false;
+    detailMapView.pointer.startX = point.clientX;
+    detailMapView.pointer.startY = point.clientY;
+    detailMapView.pointer.startTx = detailMapView.tx;
+    detailMapView.pointer.startTy = detailMapView.ty;
+  };
+  const startMapPinch = () => {
+    const points = mapPointerValues();
+    if (points.length < 2) return;
+    if (!detailMapView.initialized) fitDetailMapView();
+    const mid = detailMapMidpoint(points[0], points[1], canvas);
+    const image = detailScreenToImage(mid.sx, mid.sy);
+    detailMapView.pointer.down = true;
+    detailMapView.pointer.mode = "pinch";
+    detailMapView.pointer.moved = false;
+    detailMapView.pointer.startDistance = Math.max(1, detailMapDistance(points[0], points[1]));
+    detailMapView.pointer.startScale = detailMapView.scale;
+    detailMapView.pointer.startImageX = image.x;
+    detailMapView.pointer.startImageY = image.y;
+  };
+  const applyMapPinch = () => {
+    const points = mapPointerValues();
+    if (points.length < 2) return;
+    const mid = detailMapMidpoint(points[0], points[1], canvas);
+    const distance = Math.max(1, detailMapDistance(points[0], points[1]));
+    const ratio = distance / Math.max(1, detailMapView.pointer.startDistance);
+    const nextScale = Math.max(0.05, Math.min(30, detailMapView.pointer.startScale * ratio));
+    detailMapView.scale = nextScale;
+    detailMapView.tx = mid.sx - detailMapView.pointer.startImageX * nextScale;
+    detailMapView.ty = mid.sy - detailMapView.pointer.startImageY * nextScale;
+    detailMapView.pointer.moved = true;
+    scheduleDetailMapDraw();
+  };
 
   const onWheelZoom = (event) => {
     event.preventDefault();
@@ -1541,24 +1626,45 @@ function bindDetailMapInteraction() {
   };
 
   wrap.addEventListener("wheel", onWheelZoom, { passive: false });
+  wrap.addEventListener("touchstart", preventBrowserTouch, touchOptions);
+  wrap.addEventListener("touchmove", preventBrowserTouch, touchOptions);
+  wrap.addEventListener("gesturestart", preventBrowserTouch, touchOptions);
+  wrap.addEventListener("gesturechange", preventBrowserTouch, touchOptions);
+  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
   canvas.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
-    detailMapView.pointer.down = true;
-    detailMapView.pointer.moved = false;
-    detailMapView.pointer.startX = event.clientX;
-    detailMapView.pointer.startY = event.clientY;
-    detailMapView.pointer.startTx = detailMapView.tx;
-    detailMapView.pointer.startTy = detailMapView.ty;
-    canvas.setPointerCapture(event.pointerId);
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!mapImageLoaded || !mapImage) return;
+    if (!detailMapView.initialized) fitDetailMapView();
+    detailMapPointers.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
+    capturePointer(event);
+    if (detailMapPointers.size >= 2) {
+      startMapPinch();
+    } else {
+      startMapPan({ clientX: event.clientX, clientY: event.clientY });
+    }
     canvas.classList.add("dragging");
   });
 
   canvas.addEventListener("pointermove", (event) => {
-    if (!detailMapView.pointer.down) return;
+    if (!detailMapPointers.has(event.pointerId)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    detailMapPointers.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
+    if (detailMapPointers.size >= 2) {
+      if (detailMapView.pointer.mode !== "pinch") startMapPinch();
+      applyMapPinch();
+      return;
+    }
+    if (!detailMapView.pointer.down || detailMapView.pointer.mode !== "pan") {
+      startMapPan({ clientX: event.clientX, clientY: event.clientY });
+      return;
+    }
     const dx = event.clientX - detailMapView.pointer.startX;
     const dy = event.clientY - detailMapView.pointer.startY;
-    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
       detailMapView.pointer.moved = true;
     }
     detailMapView.tx = detailMapView.pointer.startTx + dx;
@@ -1567,16 +1673,43 @@ function bindDetailMapInteraction() {
   });
 
   canvas.addEventListener("pointerup", (event) => {
-    const wasMoved = detailMapView.pointer.moved;
-    detailMapView.pointer.down = false;
-    canvas.classList.remove("dragging");
-    if (!wasMoved) onDetailMapClick(event);
+    if (!detailMapPointers.has(event.pointerId)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const wasTap = detailMapPointers.size === 1
+      && detailMapView.pointer.mode === "pan"
+      && !detailMapView.pointer.moved;
+    detailMapPointers.delete(event.pointerId);
+    releasePointer(event);
+    if (detailMapPointers.size >= 2) {
+      startMapPinch();
+    } else if (detailMapPointers.size === 1) {
+      startMapPan(firstMapPointer());
+    } else {
+      detailMapView.pointer.down = false;
+      detailMapView.pointer.mode = "none";
+      canvas.classList.remove("dragging");
+    }
+    if (wasTap) onDetailMapClick(event);
   });
 
-  canvas.addEventListener("pointercancel", () => {
+  const cancelPointer = (event) => {
+    detailMapPointers.delete(event.pointerId);
+    releasePointer(event);
+    if (detailMapPointers.size === 1) {
+      startMapPan(firstMapPointer());
+      return;
+    }
+    if (detailMapPointers.size >= 2) {
+      startMapPinch();
+      return;
+    }
     detailMapView.pointer.down = false;
+    detailMapView.pointer.mode = "none";
     canvas.classList.remove("dragging");
-  });
+  };
+  canvas.addEventListener("pointercancel", cancelPointer);
+  canvas.addEventListener("lostpointercapture", cancelPointer);
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────

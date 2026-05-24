@@ -84,7 +84,7 @@ jobs:
       - name: Rename binary
         run: cp target/release/forza-tacho forza-tacho-linux-x86_64
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: linux
           path: forza-tacho-linux-x86_64
@@ -92,7 +92,7 @@ jobs:
   # ── Windows (native runner) ──────────────────────────────────────────────────
   build-windows:
     needs: test
-    runs-on: windows-latest
+    runs-on: windows-2022
     env:
       WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
       WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
@@ -142,7 +142,7 @@ jobs:
             Remove-Item windows-signing-cert.pfx -Force
           }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: windows
           path: target/release/forza-tacho.exe
@@ -173,7 +173,7 @@ jobs:
             target/x86_64-apple-darwin/release/forza-tacho \
             -output forza-tacho-macos
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: macos
           path: forza-tacho-macos
@@ -185,17 +185,17 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: linux
           path: artifacts
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: windows
           path: artifacts
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: macos
           path: artifacts
