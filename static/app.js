@@ -276,7 +276,7 @@ function updateWarnings(data) {
 function resetLearnedRpm() {
   learnedMaxRpm = 0;
   rpmWasReset = true;
-  els.rpmFill.style.width = "0%";
+  els.rpmFill.style.setProperty("--rpm-fill", "0%");
   els.shiftLeds.forEach((led) => {
     led.classList.remove("active");
     led.classList.remove("shiftNow");
@@ -468,7 +468,7 @@ function render(now) {
   const rpm = rpmScale(latest.engine);
   els.rpmMax.textContent = `/ ${int(rpm.maxRpm)} rpm`;
   const rpmRatio = rpm.ratio;
-  els.rpmFill.style.width = `${rpmRatio * 100}%`;
+  els.rpmFill.style.setProperty("--rpm-fill", `${rpmRatio * 100}%`);
   els.rpmFill.style.filter = rpmRatio > 0.92 ? "saturate(1.7) brightness(1.2)" : "";
   // LEDs scale to 97 % of shiftNowRpm so the last LED lights up just before
   // blinking starts (brief "all on, not yet blinking" state).
