@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.2] — 2026-05-27
+
+### Analytics
+
+- **Car list sorted by last driven** — the vehicle stats list is now ordered by most
+  recently used first.  Sort key is `max(session endedAt, power_curves lastSeenAt)`:
+  session files are the primary source of truth; the curve timestamp covers the edge
+  case where the current session has not yet been closed.
+
+---
+
 ## [0.5.1] — 2026-05-27
 
 ### Bug fixes — power curve learning
