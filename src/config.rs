@@ -65,6 +65,10 @@ pub(crate) const LIMITER_CORRECT_TOLERANCE: f64 = 0.015;
 pub(crate) const LIMIT_LEARN_MIN_RPM_GAIN: f64 = 40.0;
 pub(crate) const LIMIT_LEARN_MAX_SAMPLE_AGE: f64 = 0.5;
 pub(crate) const LIMIT_LEARN_HIGH_RPM_RATIO: f64 = 0.88;
+/// Lower RPM bound for power-curve and limit learning, as a fraction of Forza's maxRpm.
+/// Avoids a hardcoded absolute value that would cut off low-revving cars (e.g. diesels,
+/// EVs, tractors) — 20 % of a 2 500 RPM car is 500 RPM vs the old hardcoded 1 500.
+pub(crate) const POWER_LEARN_MIN_RPM_RATIO: f64 = 0.20;
 /// How long (seconds) RPM must be stable at full throttle in the high-RPM zone before
 /// the continuation path is considered a terrain/speed plateau and is suppressed.
 /// Prevents weak cars on hills from recording a falsely low maxObservedRpm.

@@ -196,7 +196,7 @@ impl PowerCurveStore {
         let now = get_f64(payload, &["receivedAt"]);
         let max_rpm = get_f64(payload, &["engine", "maxRpm"]).max(3000.0);
         let accel = get_f64(payload, &["controls", "accel"]);
-        if key.is_empty() || gear <= 0 || rpm < 1500.0 {
+        if key.is_empty() || gear <= 0 || rpm < max_rpm * POWER_LEARN_MIN_RPM_RATIO {
             return (0.0, 0, 0.0);
         }
         let mut curves = self.curves.lock().unwrap_or_else(|e| e.into_inner());
@@ -543,13 +543,14 @@ impl PowerCurveStore {
         let rpm = get_f64(payload, &["engine", "rpm"]);
         let power = get_f64(payload, &["engine", "powerHp"]);
         let torque = get_f64(payload, &["engine", "torqueNm"]);
+        let max_rpm = get_f64(payload, &["engine", "maxRpm"]).max(3000.0);
         if key.is_empty()
             || get_f64(payload, &["controls", "accel"]) < FULL_THROTTLE_MIN
             || get_f64(payload, &["controls", "brake"]) > FULL_THROTTLE_MAX_BRAKE
         {
             return;
         }
-        if rpm < 1500.0 || rpm > limit_rpm * 1.02 || power <= 0.0 {
+        if rpm < max_rpm * POWER_LEARN_MIN_RPM_RATIO || rpm > limit_rpm * 1.02 || power <= 0.0 {
             return;
         }
         // Skip learning while the rev-limiter oscillation is being confirmed.

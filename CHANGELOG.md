@@ -28,6 +28,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   sample is allowed through.  Falling passes (downshift over-rev, limiter bounce recovery)
   are silently skipped; `lastLearnSample` is still updated so direction tracking stays
   accurate for the next packet.
+- **Relative lower RPM bound** — the minimum RPM for power-curve and limit learning is
+  now `maxRpm × POWER_LEARN_MIN_RPM_RATIO` (20 %) instead of a hardcoded 1 500 RPM.
+  Low-revving cars (diesels, heavy trucks, anything below ~7 500 RPM max) no longer lose
+  a disproportionate slice of their usable rev range.
 - **Limiter-bounce contamination** — `learn()` now exits immediately when
   `bounce_count > 0`.  During active bounce detection Forza intermittently cuts engine
   power; partial or zero-power readings would corrupt the top of the power curve.
