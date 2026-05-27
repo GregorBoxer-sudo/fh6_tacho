@@ -268,6 +268,12 @@ pub(crate) fn car_browser(power_curves_path: &Path, sessions_dir: &Path) -> Valu
         let stats = session_stats.get(&key);
         let max_rpm = number_field(&curve, "maxRpmSignature");
         let max_gear = number_field(&curve, "maxObservedGear");
+        // Effective "last seen" = max of session-file ground truth and the in-memory
+        // power-curve timestamp.  The session value is more reliable long-term; the
+        // curve value catches the current live session before it has been flushed.
+        let session_last = stats.map(|s| s.last_seen_at).unwrap_or(0.0);
+        let curve_last   = number_field(&curve, "lastSeenAt");
+        let last_seen_at = session_last.max(curve_last);
         cars.push(json!({
             "key": key,
             "ordinal": key.split(':').next().unwrap_or(""),
@@ -284,7 +290,7 @@ pub(crate) fn car_browser(power_curves_path: &Path, sessions_dir: &Path) -> Valu
             "shiftTargets": curve.get("optimalShiftRpmByGear").cloned().unwrap_or_else(|| json!({})),
             "standardShiftTargets": standard_shift_targets(max_rpm, max_gear),
             "dropRatios": curve.get("gearDropRatios").cloned().unwrap_or_else(|| json!({})),
-            "lastSeenAt": number_field(&curve, "lastSeenAt"),
+            "lastSeenAt": last_seen_at,
         }));
     }
     cars.sort_by(|a, b| {
@@ -602,6 +608,10 @@ struct CarStats {
     cylinders: Option<i64>,
     max_speed: f64,
     max_power: f64,
+    /// Timestamp of the most recent session that involved this car (`endedAt`).
+    /// Used as the primary sort key so the last-driven car always appears first,
+    /// even if power_curves.json has a stale or missing `lastSeenAt`.
+    last_seen_at: f64,
 }
 
 fn car_stats_from_sessions(dir: &Path) -> HashMap<String, CarStats> {
@@ -628,6 +638,9 @@ fn car_stats_from_sessions(dir: &Path) -> HashMap<String, CarStats> {
         entry.cylinders = Some(get_f64(&summary, &["cylinders"]) as i64);
         entry.max_speed = entry.max_speed.max(get_f64(&summary, &["maxSpeed"]));
         entry.max_power = entry.max_power.max(get_f64(&summary, &["maxPower"]));
+        // Track the most recent session end time — more reliable than power_curves
+        // lastSeenAt because session files are written independently of the curve store.
+        entry.last_seen_at = entry.last_seen_at.max(get_f64(&summary, &["endedAt"]));
     }
     stats
 }
