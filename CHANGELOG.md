@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.4.7] — 2026-05-27
+
+### Bug fixes
+
+- **Single-lap race analytics** — races that consist of only one lap (Forza lap number never
+  increments past 0) now correctly show `totalLaps = 1` and the lap time in the lap-times grid
+  instead of appearing empty.
+- **Power curve contamination at high RPM** — the learning algorithm no longer records samples
+  while RPM is falling at high values (downshift over-rev, limiter bounce recovery).  A
+  confirmed rising run of at least 5 % of `maxRpm` is required before high-RPM buckets are
+  written.  Additionally, samples are skipped when the limiter-bounce counter is active
+  (`bounceCount > 0`).
+- **Weak car / uphill limit learning** — the `is_high_rpm_continuation` path in max-RPM
+  detection now requires full throttle (option C), only fires in the lower half of observed
+  gears (the driver passes through these first and hits the real limiter there), and is
+  suppressed after RPM has been stable for 2 s at full throttle without bounce detection
+  (plateau detector, option E).  Together these prevent a weak car plateauing on a hill from
+  recording a falsely low `maxObservedRpm`.
+- **Touch pinch-to-zoom on analytics chart** — two-finger pinch now zooms the session chart
+  on mobile / tablet; single-finger drag-to-pan and mouse-wheel zoom remain unchanged.
+  `touch-action: none` prevents the browser from intercepting touch events for page scroll.
+
+---
+
 ## [0.4.0] — 2026-05-24
 
 ### Analytics — new features
