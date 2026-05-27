@@ -583,6 +583,12 @@ impl PowerCurveStore {
             "lastLearnSample".to_string(),
             json!({ "gear": gear, "rpm": rpm, "at": now, "runStartRpm": 0.0 }),
         );
+        // Direction filter: only record samples while RPM is rising within the same gear.
+        // When there is no recent same-gear context (gap > MAX_SAMPLE_AGE or gear change)
+        // we allow the sample through — we have no direction reference yet.
+        if age_ok_l && prev_gear_l == gear && rpm < prev_rpm_l {
+            return;
+        }
 
         let buckets = ensure_object(curve, "buckets");
         let is_new_bucket = !buckets.contains_key(&bucket);
