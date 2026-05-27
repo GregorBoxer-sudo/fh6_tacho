@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.1] — 2026-05-27
+
+### Bug fixes — power curve learning
+
+- **Direction filter** — bucket samples are only written while RPM is rising within the
+  same gear.  When no recent same-gear context exists (gap > 0.5 s or gear change) the
+  sample is allowed through.  Falling passes (downshift over-rev, limiter bounce recovery)
+  are silently skipped; `lastLearnSample` is still updated so direction tracking stays
+  accurate for the next packet.
+- **Relative lower RPM bound** — the minimum RPM for power-curve and limit learning is
+  now `maxRpm × POWER_LEARN_MIN_RPM_RATIO` (20 %) instead of a hardcoded 1 500 RPM.
+  Low-revving cars (diesels, heavy trucks, anything below ~7 500 RPM max) no longer lose
+  a disproportionate slice of their usable rev range.
+
+---
+
 ## [0.5.0] — 2026-05-27
 
 ### Bug fixes — limit learning
@@ -23,15 +39,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Bug fixes — power curve learning
 
-- **Direction filter** — bucket samples are only written while RPM is rising within the
-  same gear.  When no recent same-gear context exists (gap > 0.5 s or gear change) the
-  sample is allowed through.  Falling passes (downshift over-rev, limiter bounce recovery)
-  are silently skipped; `lastLearnSample` is still updated so direction tracking stays
-  accurate for the next packet.
-- **Relative lower RPM bound** — the minimum RPM for power-curve and limit learning is
-  now `maxRpm × POWER_LEARN_MIN_RPM_RATIO` (20 %) instead of a hardcoded 1 500 RPM.
-  Low-revving cars (diesels, heavy trucks, anything below ~7 500 RPM max) no longer lose
-  a disproportionate slice of their usable rev range.
 - **Limiter-bounce contamination** — `learn()` now exits immediately when
   `bounce_count > 0`.  During active bounce detection Forza intermittently cuts engine
   power; partial or zero-power readings would corrupt the top of the power curve.
