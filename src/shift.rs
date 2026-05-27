@@ -212,17 +212,40 @@ impl PowerCurveStore {
             let is_rising_same_gear = previous_gear == gear
                 && rpm >= previous_rpm + LIMIT_LEARN_MIN_RPM_GAIN
                 && now - previous_at <= LIMIT_LEARN_MAX_SAMPLE_AGE;
+            // Lower-half guard: weak/tall-geared cars plateau in high gears first,
+            // never reaching the real engine limiter there.  Only allow the continuation
+            // path in the lower half of observed gears where the driver is more likely
+            // to be heading into a true limiter hit.
+            let max_obs_gear = get_curve_i64(curve, "maxObservedGear").max(1);
+            let gear_half = (max_obs_gear / 2).max(1);
             let is_high_rpm_continuation = previous_gear == gear
                 && now - previous_at <= LIMIT_LEARN_MAX_SAMPLE_AGE
                 && rpm >= previous_rpm - LIMIT_LEARN_MIN_RPM_GAIN
-                && rpm >= current_baseline * LIMIT_LEARN_HIGH_RPM_RATIO;
+                && rpm >= current_baseline * LIMIT_LEARN_HIGH_RPM_RATIO
+                && accel >= FULL_THROTTLE_MIN   // C: full throttle required — coasting or
+                                                //    hill-descent at high RPM must not count
+                && gear <= gear_half;           // lower-half gears only
             curve.insert(
                 "lastLimitSample".to_string(),
                 json!({ "gear": gear, "rpm": rpm, "at": now }),
             );
+            // Plateau detector (E): if RPM has been stable (no meaningful rise) at full
+            // throttle for >= LIMIT_LEARN_PLATEAU_SECONDS, the car is terrain- or
+            // speed-limited, not engine-limited — suppress the continuation path so a
+            // hilltop or top-speed plateau doesn't record a falsely low maxObservedRpm.
+            let prev_plateau_since = get_curve_f64(curve, "limitLearnPlateauSince");
+            let new_plateau_since = if is_high_rpm_continuation && !is_rising_same_gear {
+                if prev_plateau_since > 0.0 { prev_plateau_since } else { now }
+            } else {
+                0.0
+            };
+            curve.insert("limitLearnPlateauSince".to_string(), json!(new_plateau_since));
+            let is_plateau = new_plateau_since > 0.0
+                && now - new_plateau_since >= LIMIT_LEARN_PLATEAU_SECONDS;
+
             let previous_max = get_curve_f64(curve, "maxObservedRpm");
             let mut should_save = false;
-            if (is_rising_same_gear || is_high_rpm_continuation) && rpm > previous_max {
+            if (is_rising_same_gear || (is_high_rpm_continuation && !is_plateau)) && rpm > previous_max {
                 curve.insert("maxObservedRpm".to_string(), json!(rpm));
                 curve.insert("updatedAt".to_string(), json!(now_seconds()));
                 let saved = get_curve_f64(curve, "savedMaxObservedRpm");
@@ -434,10 +457,14 @@ impl PowerCurveStore {
                     let point = drops.get_mut(&transition).unwrap().as_object_mut().unwrap();
                     let samples = get_curve_i64(point, "samples");
                     let previous_ratio = get_curve_f64(point, "ratio");
-                    point.insert(
-                        "ratio".to_string(),
-                        json!((previous_ratio * samples as f64 + ratio) / (samples as f64 + 1.0)),
-                    );
+                    // EMA: first observation is stored as-is; subsequent ones blend toward
+                    // the latest at GEAR_DROP_EMA_RATE so old outlier shifts decay naturally.
+                    let new_ratio = if samples == 0 {
+                        ratio
+                    } else {
+                        previous_ratio * (1.0 - GEAR_DROP_EMA_RATE) + ratio * GEAR_DROP_EMA_RATE
+                    };
+                    point.insert("ratio".to_string(), json!(new_ratio));
                     point.insert("samples".to_string(), json!(samples + 1));
                     mark_shift_cache_dirty(curve, Some(&[previous_gear]));
                     curve.insert("updatedAt".to_string(), json!(now));
@@ -511,7 +538,7 @@ impl PowerCurveStore {
         }
     }
 
-    fn learn(&self, payload: &Value, limit_rpm: f64) {
+    fn learn(&self, payload: &Value, limit_rpm: f64, bounce_count: i64) {
         let key = power_curve_key(payload);
         let rpm = get_f64(payload, &["engine", "rpm"]);
         let power = get_f64(payload, &["engine", "powerHp"]);
@@ -525,30 +552,92 @@ impl PowerCurveStore {
         if rpm < 1500.0 || rpm > limit_rpm * 1.02 || power <= 0.0 {
             return;
         }
+        // Skip learning while the rev-limiter oscillation is being confirmed.
+        // During bounce detection Forza intermittently cuts engine power; those
+        // partial or zero-power readings are unreliable and would corrupt the
+        // high-RPM end of the power curve.
+        if bounce_count > 0 {
+            return;
+        }
+        let now   = get_f64(payload, &["receivedAt"]);
+        let gear  = learned_forward_gear(payload);
         let bucket = bucket_key(rpm);
         let mut curves = self.curves.lock().unwrap_or_else(|e| e.into_inner());
         let curve = Self::curve_mut(&mut curves, &key);
+
+        // Detect a new ascending run through this bucket:
+        // a run starts when the car enters the bucket from below (previous RPM was in
+        // a lower bucket, same gear, within the sample-age window).
+        // This is independent of acceleration rate — a fast car with 1 sample/pass and
+        // a slow car with 20 samples/pass both increment runs exactly once per pass.
+        let prev_learn    = curve.get("lastLearnSample").cloned().unwrap_or(Value::Null);
+        let prev_rpm_l    = get_child_f64(&prev_learn, "rpm");
+        let prev_at_l     = get_child_f64(&prev_learn, "at");
+        let prev_gear_l   = get_child_i64(&prev_learn, "gear");
+        let age_ok_l      = prev_at_l > 0.0 && now - prev_at_l <= LIMIT_LEARN_MAX_SAMPLE_AGE;
+        let entering_bucket = age_ok_l
+            && prev_gear_l == gear
+            && rpm > prev_rpm_l              // rising
+            && bucket_key(prev_rpm_l) != bucket; // crossed into a new bucket
+        curve.insert(
+            "lastLearnSample".to_string(),
+            json!({ "gear": gear, "rpm": rpm, "at": now, "runStartRpm": 0.0 }),
+        );
+
         let buckets = ensure_object(curve, "buckets");
         let is_new_bucket = !buckets.contains_key(&bucket);
         if !buckets.get(&bucket).is_some_and(Value::is_object) {
-            buckets.insert(bucket.clone(), json!({ "power": 0.0, "torque": 0.0, "samples": 0 }));
+            buckets.insert(
+                bucket.clone(),
+                json!({ "power": 0.0, "torque": 0.0, "samples": 0, "runs": 0 }),
+            );
         }
         let point = buckets.get_mut(&bucket).unwrap().as_object_mut().unwrap();
-        let previous_power = get_curve_f64(point, "power");
+        let previous_power  = get_curve_f64(point, "power");
         let previous_torque = get_curve_f64(point, "torque");
-        point.insert("power".to_string(), json!(previous_power.max(power)));
-        point.insert("torque".to_string(), json!(previous_torque.max(torque)));
-        let samples = get_curve_i64(point, "samples") + 1;
-        point.insert("samples".to_string(), json!(samples));
+        let samples         = get_curve_i64(point, "samples");
+        let runs            = get_curve_i64(point, "runs") + if entering_bucket { 1 } else { 0 };
+        point.insert("runs".to_string(), json!(runs));
+
+        // Bidirectional EMA bucket learning:
+        //
+        //   Fresh bucket (< RELEARN_MIN_RUNS ascending passes):
+        //     Take max() immediately — still exploring, find the real ceiling fast.
+        //
+        //   Established bucket (≥ RELEARN_MIN_RUNS):
+        //     • Deviation ≤ TOLERANCE   → keep stored value (sensor noise, ignore).
+        //     • Deviation > TOLERANCE   → symmetric EMA blend toward current reading.
+        //
+        //   A single outlier sample shifts the bucket by only RELEARN_RATE and
+        //   self-corrects on the next clean pass.  A sustained real change (3 passes)
+        //   moves the stored value ~70 % of the way to the new truth.
+        let blend = |stored: f64, current: f64| -> f64 {
+            if stored <= 0.0 || runs < POWER_BUCKET_RELEARN_MIN_RUNS {
+                return stored.max(current);
+            }
+            let deviation = (current - stored).abs() / stored;
+            if deviation > POWER_BUCKET_RELEARN_TOLERANCE {
+                stored * (1.0 - POWER_BUCKET_RELEARN_RATE) + current * POWER_BUCKET_RELEARN_RATE
+            } else {
+                stored // small fluctuation — hold steady
+            }
+        };
+        let new_power  = blend(previous_power,  power);
+        let new_torque = blend(previous_torque, torque);
+
+        point.insert("power".to_string(),  json!(new_power));
+        point.insert("torque".to_string(), json!(new_torque));
+        point.insert("samples".to_string(), json!(samples + 1));
+
+        let power_up   = previous_power > 0.0 && new_power > previous_power * 1.001;
+        let power_down = previous_power > 0.0 && new_power < previous_power * 0.999;
         if is_new_bucket {
             mark_no_optimal_shift_cache_dirty(curve);
-        } else if previous_power > 0.0 && power > previous_power {
-            // Any improvement to the power curve invalidates the shift cache so that
-            // shift points are continuously refined as better data comes in.
+        } else if power_up || power_down {
             mark_shift_cache_dirty(curve, None);
         }
         curve.insert("updatedAt".to_string(), json!(now_seconds()));
-        if samples == 1 || samples % 20 == 0 {
+        if samples == 0 || samples % 20 == 0 {
             self.queue_save(&curves);
         }
     }
@@ -858,7 +947,7 @@ pub(crate) fn enrich_shift_data(payload: &mut Value, power_curves: Option<&Arc<P
             learned_shift_rpm =
                 store.cached_power_shift_rpm(payload, limit_rpm, safety_shift_rpm, rpm_rate);
         }
-        store.learn(payload, limit_rpm);
+        store.learn(payload, limit_rpm, bounce_count);
     }
     let warned_learned_shift_rpm =
         learned_shift_rpm.map(|rpm| dynamic_shift_warning_rpm(rpm, rpm_rate, warning_lead_seconds));

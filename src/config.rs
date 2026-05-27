@@ -65,7 +65,35 @@ pub(crate) const LIMITER_CORRECT_TOLERANCE: f64 = 0.015;
 pub(crate) const LIMIT_LEARN_MIN_RPM_GAIN: f64 = 40.0;
 pub(crate) const LIMIT_LEARN_MAX_SAMPLE_AGE: f64 = 0.5;
 pub(crate) const LIMIT_LEARN_HIGH_RPM_RATIO: f64 = 0.88;
+/// How long (seconds) RPM must be stable at full throttle in the high-RPM zone before
+/// the continuation path is considered a terrain/speed plateau and is suppressed.
+/// Prevents weak cars on hills from recording a falsely low maxObservedRpm.
+pub(crate) const LIMIT_LEARN_PLATEAU_SECONDS: f64 = 2.0;
+/// EMA blend weight for each new gear-drop ratio sample.
+/// 0.25 → new = 0.75 × old + 0.25 × latest.  Converges in ~4 clean shifts while
+/// letting old outlier measurements decay naturally (unlike a running average that
+/// weights every historical sample equally forever).
+pub(crate) const GEAR_DROP_EMA_RATE: f64 = 0.25;
 pub(crate) const SHIFT_CACHE_VALIDATION_RPM_WINDOW: f64 = 300.0;
+/// Minimum number of distinct ascending runs through a power-curve bucket before
+/// bidirectional EMA re-learning kicks in.  A "run" is one full-throttle pass
+/// through the bucket from below (RPM enters the bucket rising from a lower bucket).
+///
+/// Run-counting is independent of acceleration: a fast car with only 1 sample per
+/// pass and a slow car with 20 samples per pass both need the same number of actual
+/// runs before the bucket is considered established.
+pub(crate) const POWER_BUCKET_RELEARN_MIN_RUNS: i64 = 3;
+/// A new reading must differ from the stored value by more than this fraction
+/// in either direction to trigger an EMA update (0.05 = 5 %).
+/// Keeps small sensor noise from moving established buckets while still
+/// reacting to genuine changes and contaminated spikes (typically 20–50 % off).
+pub(crate) const POWER_BUCKET_RELEARN_TOLERANCE: f64 = 0.05;
+/// Per-sample EMA blend weight — applied symmetrically for both upward and
+/// downward corrections once a bucket is established.
+/// 0.12 → new = 0.88 × old + 0.12 × current each qualifying sample.
+/// A sustained real change (10 qualifying samples) moves the value ~72 % of the way;
+/// a single outlier only shifts it by 12 % and self-corrects on the next pass.
+pub(crate) const POWER_BUCKET_RELEARN_RATE: f64 = 0.12;
 
 #[derive(Parser, Debug, Clone)]
 #[command(about = "Local Forza telemetry dashboard")]

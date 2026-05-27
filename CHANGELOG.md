@@ -5,6 +5,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.0] — 2026-05-27
+
+### Bug fixes — limit learning
+
+- **Weak-car / uphill `maxObservedRpm` false plateau** — the `is_high_rpm_continuation`
+  path (which allows a stable high-RPM reading to advance `maxObservedRpm` without a
+  confirmed rising run) now has three additional guards:
+  - **Full-throttle only (C)** — coasting or hill-descent at high RPM no longer counts.
+  - **Lower-half gears only** — only gears in the lower half of the observed gear count
+    are eligible.  Weak cars plateau in top gear first; that gear now never advances the
+    limit via the continuation path.
+  - **Plateau detector (E)** — if RPM has been stable (no `LIMIT_LEARN_MIN_RPM_GAIN`
+    rise within `LIMIT_LEARN_MAX_SAMPLE_AGE`) at full throttle for
+    ≥ `LIMIT_LEARN_PLATEAU_SECONDS` (2 s), the sample is treated as a terrain/speed
+    plateau and the limit update is suppressed.
+
+### Bug fixes — power curve learning
+
+- **Limiter-bounce contamination** — `learn()` now exits immediately when
+  `bounce_count > 0`.  During active bounce detection Forza intermittently cuts engine
+  power; partial or zero-power readings would corrupt the top of the power curve.
+  The existing `power > 0` gate already blocks full-cut samples; this guard additionally
+  blocks partial readings while the oscillation is being confirmed.
+
+### Improvements — gear-drop ratio
+
+- **EMA instead of cumulative average** — the gear-drop ratio (RPM after upshift ÷ RPM
+  before) is now blended with `GEAR_DROP_EMA_RATE = 0.25` per observed shift instead of
+  a plain running average.  Old outlier measurements decay naturally; a steady real change
+  in ratio (e.g. a retune) converges in ~4 clean shifts rather than being diluted by all
+  prior history.
+
+---
+
 ## [0.4.8] — 2026-05-27
 
 ### Bug fixes
