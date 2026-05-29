@@ -922,13 +922,24 @@ fn compute_power_shift_rpm(
     if gear <= 0 {
         return None;
     }
-    let drop_ratio = curve
+    let drop_entry = curve
         .get("gearDropRatios")
         .and_then(Value::as_object)
-        .and_then(|d| d.get(&format!("{gear}>{}", gear + 1)))
+        .and_then(|d| d.get(&format!("{gear}>{}", gear + 1)));
+    let drop_ratio = drop_entry
         .map(|p| get_child_f64(p, "ratio"))
         .unwrap_or(0.0);
     if drop_ratio <= 0.0 {
+        return None;
+    }
+    // Require at least SHIFT_DROP_MIN_SAMPLES observations before trusting the
+    // EMA ratio.  A single outlier first shift (clutch slip, hill, mid-corner
+    // lift) cannot immediately arm the learned shift point; the safety path is
+    // used until a second consistent sample confirms the ratio is plausible.
+    let drop_samples = drop_entry
+        .map(|p| get_child_i64(p, "samples"))
+        .unwrap_or(0);
+    if drop_samples < SHIFT_DROP_MIN_SAMPLES {
         return None;
     }
     let points = curve_points_from_buckets(curve.get("buckets"), limit_rpm);
@@ -1761,5 +1772,57 @@ mod tests {
             let payload = json!({ "controls": { "gear": g } });
             assert_eq!(learned_forward_gear(&payload), g);
         }
+    }
+
+    // ── compute_power_shift_rpm — sample gate ─────────────────────────────────
+
+    /// Helper: build a minimal curve map with enough power-curve buckets and a
+    /// gear-drop ratio at the given sample count.
+    fn make_curve_with_drop(drop_samples: i64) -> Map<String, Value> {
+        // Six buckets, each with 5 samples, power rising from 1000→6000 RPM.
+        // This satisfies POWER_CURVE_MIN_BUCKETS (6) and SHIFT_POWER_GAIN_RATIO.
+        let mut buckets = serde_json::Map::new();
+        for (i, rpm) in [3000u32, 4000, 5000, 6000, 7000, 7500].iter().enumerate() {
+            let power = 200.0 + i as f64 * 20.0; // rising power curve
+            buckets.insert(rpm.to_string(), json!({ "samples": 5, "power": power, "runs": 3 }));
+        }
+        let mut curve = serde_json::Map::new();
+        curve.insert("buckets".to_string(), json!(buckets));
+        // Drop ratio for gear 3→4: 0.65 (realistic 4-speed spread)
+        curve.insert(
+            "gearDropRatios".to_string(),
+            json!({ "3>4": { "ratio": 0.65, "samples": drop_samples } }),
+        );
+        curve
+    }
+
+    #[test]
+    fn gear_drop_withheld_until_min_samples() {
+        let payload = json!({ "controls": { "gear": 3 }, "engine": { "maxRpm": 8000.0, "idleRpm": 800.0 } });
+        let limit_rpm = 7600.0;
+        let max_shift_rpm = 7550.0;
+
+        // 0 samples → None (no data at all)
+        let curve0 = make_curve_with_drop(0);
+        assert_eq!(
+            compute_power_shift_rpm(&curve0, &payload, limit_rpm, max_shift_rpm),
+            None,
+            "0 samples: should not arm"
+        );
+
+        // 1 sample → None (below SHIFT_DROP_MIN_SAMPLES = 2)
+        let curve1 = make_curve_with_drop(1);
+        assert_eq!(
+            compute_power_shift_rpm(&curve1, &payload, limit_rpm, max_shift_rpm),
+            None,
+            "1 sample: should not arm (outlier protection)"
+        );
+
+        // 2 samples → Some (threshold met, learned shift point activates)
+        let curve2 = make_curve_with_drop(2);
+        assert!(
+            compute_power_shift_rpm(&curve2, &payload, limit_rpm, max_shift_rpm).is_some(),
+            "2 samples: should arm the optimal shift point"
+        );
     }
 }

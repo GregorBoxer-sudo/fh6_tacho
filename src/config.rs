@@ -93,6 +93,24 @@ pub(crate) const LIMIT_LEARN_PLATEAU_SECONDS: f64 = 2.0;
 /// letting old outlier measurements decay naturally (unlike a running average that
 /// weights every historical sample equally forever).
 pub(crate) const GEAR_DROP_EMA_RATE: f64 = 0.25;
+/// Minimum number of accumulated gear-drop samples before the stored ratio is
+/// trusted by compute_power_shift_rpm().  Until this threshold is met, the
+/// function returns None so the safety shift path is used.
+///
+/// Set to 2 so a single outlier first shift (clutch slip, mid-corner lift,
+/// hill crest) cannot immediately skew the shift point for that gear.  The
+/// EMA blend (GEAR_DROP_EMA_RATE = 0.25) keeps converging toward the true
+/// ratio regardless; this gate simply delays arming until a second data point
+/// confirms the first is plausible.
+pub(crate) const SHIFT_DROP_MIN_SAMPLES: i64 = 2;
+/// Future-use tolerance for checking whether the EMA ratio has converged
+/// enough to be trusted.  Currently unused in the gate logic (the samples
+/// count is sufficient); reserved here so the concept has a named constant
+/// and a defined home for future variance-based checks.
+///
+/// Interpretation: two ratios are "consistent" if they agree within ±6 %
+/// of the larger one (e.g. 0.65 → acceptable range 0.611 – 0.689).
+pub(crate) const SHIFT_DROP_CONSISTENCY_TOLERANCE: f64 = 0.06;
 pub(crate) const SHIFT_CACHE_VALIDATION_RPM_WINDOW: f64 = 300.0;
 /// Minimum number of distinct ascending runs through a power-curve bucket before
 /// bidirectional EMA re-learning kicks in.  A "run" is one full-throttle pass
