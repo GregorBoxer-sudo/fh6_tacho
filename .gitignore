@@ -10,3 +10,6 @@
 # Distribution package
 /dist/
 *.zip
+
+# Atomic-write temp files — should never exist at rest, excluded as a safety net
+*.tmp
