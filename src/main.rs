@@ -123,7 +123,7 @@ fn run_with_gui(
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .expect("Tokio-Runtime konnte nicht erstellt werden");
+            .expect("failed to build Tokio runtime");
 
         rt.block_on(async move {
             if args_bg.demo {
@@ -132,7 +132,7 @@ fn run_with_gui(
                     power_curves_bg.clone(),
                     recorder_bg.clone(),
                 ));
-                eprintln!("Demo-Telemetrie läuft mit 60 Hz");
+                eprintln!("demo telemetry running at 60 Hz");
             } else {
                 tokio::spawn(udp_loop(
                     hub_bg.clone(),
@@ -143,7 +143,7 @@ fn run_with_gui(
             }
 
             eprintln!(
-                "Web-Dashboard erreichbar auf {}:{}",
+                "web dashboard available at {}:{}",
                 args_bg.http_host, args_bg.http_port
             );
             for address in lan_addresses() {
@@ -152,9 +152,9 @@ fn run_with_gui(
 
             if let Err(e) = run_http(root_bg.join("data"), hub_bg, &args_bg, settings_bg)
                 .await
-                .context("HTTP-Server")
+                .context("HTTP server")
             {
-                eprintln!("Server-Fehler: {e:#}");
+                eprintln!("server error: {e:#}");
             }
         });
     });
@@ -177,7 +177,7 @@ fn run_terminal(
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("Tokio-Runtime konnte nicht erstellt werden")
+        .expect("failed to build Tokio runtime")
         .block_on(async move {
             if args.demo {
                 tokio::spawn(demo_loop(
@@ -185,7 +185,7 @@ fn run_terminal(
                     power_curves.clone(),
                     recorder.clone(),
                 ));
-                println!("Demo-Telemetrie läuft mit 60 Hz");
+                println!("demo telemetry running at 60 Hz");
             } else {
                 tokio::spawn(udp_loop(
                     hub.clone(),
@@ -196,7 +196,7 @@ fn run_terminal(
             }
 
             println!(
-                "Web-Dashboard erreichbar auf {}:{}",
+                "web dashboard available at {}:{}",
                 args.http_host, args.http_port
             );
             for address in lan_addresses() {
@@ -205,6 +205,6 @@ fn run_terminal(
 
             run_http(root.join("data"), hub, &args, app_settings)
                 .await
-                .context("HTTP-Server")
+                .context("HTTP server")
         })
 }
