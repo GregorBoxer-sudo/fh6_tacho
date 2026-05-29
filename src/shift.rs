@@ -2,6 +2,7 @@ use serde_json::{Map, Value, json};
 use std::{
     collections::HashSet,
     fs,
+    io,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -32,11 +33,7 @@ impl PowerCurveStore {
         limiter_debug: bool,
     ) -> Self {
         let path = path.into();
-        let curves = fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .and_then(|value| value.as_object().cloned())
-            .unwrap_or_default();
+        let curves = Self::load_curves(&path);
         let save_tx = Self::spawn_save_worker(path.clone());
         Self {
             path,
@@ -48,8 +45,75 @@ impl PowerCurveStore {
         }
     }
 
+    /// Loads the curve store from disk, logging failures loudly instead of
+    /// silently discarding learned data.  On a corrupted primary file, falls
+    /// back to the `.bak` before giving up.
+    fn load_curves(path: &PathBuf) -> Map<String, Value> {
+        match fs::read_to_string(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // First run — no learned data yet, nothing to warn about.
+                Map::new()
+            }
+            Err(e) => {
+                eprintln!(
+                    "shift-cache: could not read {}: {e} — starting empty",
+                    path.display()
+                );
+                Map::new()
+            }
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(v) if v.is_object() => {
+                    let mut map = v.as_object().cloned().unwrap_or_default();
+                    migrate_schema(&mut map);
+                    map
+                }
+                _ => {
+                    let bak = path.with_extension("json.bak");
+                    eprintln!(
+                        "shift-cache: WARN — {} could not be parsed; all learned shift \
+                         data is unavailable. The backup at {} was left untouched.",
+                        path.display(),
+                        bak.display()
+                    );
+                    // Attempt to recover from the most recent backup.
+                    match fs::read_to_string(&bak) {
+                        Ok(t) => match serde_json::from_str::<Value>(&t) {
+                            Ok(v) if v.is_object() => {
+                                eprintln!(
+                                    "shift-cache: recovered learned data from {}",
+                                    bak.display()
+                                );
+                                let mut map = v.as_object().cloned().unwrap_or_default();
+                                migrate_schema(&mut map);
+                                map
+                            }
+                            _ => {
+                                eprintln!(
+                                    "shift-cache: backup {} also unreadable — starting empty",
+                                    bak.display()
+                                );
+                                Map::new()
+                            }
+                        },
+                        Err(_) => {
+                            eprintln!(
+                                "shift-cache: no usable backup at {} — starting empty",
+                                bak.display()
+                            );
+                            Map::new()
+                        }
+                    }
+                }
+            },
+        }
+    }
+
     /// Spawns a dedicated thread that receives serialised JSON and writes it
     /// atomically to disk.  Lives for the lifetime of the process.
+    ///
+    /// Write order: (1) copy current good file → .bak, (2) write new content
+    /// → .tmp, (3) rename .tmp → main.  A crash at any step leaves either the
+    /// previous good file or the new good file intact, plus a usable .bak.
     fn spawn_save_worker(path: PathBuf) -> std::sync::mpsc::SyncSender<String> {
         let (tx, rx) = std::sync::mpsc::sync_channel::<String>(2);
         std::thread::Builder::new()
@@ -59,6 +123,18 @@ impl PowerCurveStore {
                     let _ = fs::create_dir_all(parent);
                 }
                 while let Ok(json) = rx.recv() {
+                    // Step 1: back up the current good file before overwriting.
+                    // Non-fatal: losing the backup is better than losing the new data.
+                    if path.exists() {
+                        let bak = path.with_extension("json.bak");
+                        if let Err(e) = fs::copy(&path, &bak) {
+                            eprintln!(
+                                "shift-cache: could not write backup {}: {e}",
+                                bak.display()
+                            );
+                        }
+                    }
+                    // Steps 2–3: write to .tmp then atomic rename.
                     let tmp = path.with_extension("tmp");
                     if fs::write(&tmp, &json).is_ok() {
                         let _ = fs::rename(&tmp, &path);
@@ -69,11 +145,20 @@ impl PowerCurveStore {
         tx
     }
 
-    /// Serialise `curves` and hand the bytes off to the save-worker.
-    /// Never blocks — if the worker already has two pending writes the
-    /// current snapshot is dropped (the next save will include it anyway).
+    /// Serialise `curves` (injecting the schema version) and hand the bytes
+    /// off to the save-worker.  Never blocks — if the worker already has two
+    /// pending writes the current snapshot is dropped (the next save will
+    /// include it anyway).
     fn queue_save(&self, curves: &Map<String, Value>) {
-        if let Ok(text) = serde_json::to_string(curves) {
+        // Inject the top-level schema version so future readers can migrate
+        // the data structure without guessing.  Car-curve keys (ordinal:pi)
+        // are numeric strings that never collide with "schemaVersion".
+        let mut root = Map::with_capacity(curves.len() + 1);
+        root.insert("schemaVersion".to_string(), json!(SHIFT_CACHE_SCHEMA_VERSION));
+        for (k, v) in curves {
+            root.insert(k.clone(), v.clone());
+        }
+        if let Ok(text) = serde_json::to_string(&root) {
             let _ = self.save_tx.try_send(text);
         }
     }
@@ -919,6 +1004,25 @@ fn interpolated_power(points: &[CurvePoint], rpm: f64) -> Option<f64> {
         }
     }
     Some(points[points.len() - 1].power)
+}
+
+/// Migrates the on-disk curve map to the current schema version in-place.
+///
+/// `schemaVersion` governs structural changes to the JSON layout (added /
+/// removed top-level keys, renamed fields).  It is distinct from the per-curve
+/// `shiftStrategyVersion`, which triggers an algorithm *recompute* when the
+/// shift maths change — `schemaVersion` is about *data shape*, not calculation.
+///
+/// A no-op switch for now; add new arms as the schema evolves.
+fn migrate_schema(map: &mut Map<String, Value>) {
+    let version = map
+        .get("schemaVersion")
+        .and_then(Value::as_u64)
+        .unwrap_or(1); // pre-versioning files are treated as v1
+    match version {
+        1 => {} // current version — nothing to migrate
+        v => eprintln!("shift-cache: unknown schemaVersion {v}; loading as-is"),
+    }
 }
 
 pub(crate) fn enrich_shift_data(payload: &mut Value, power_curves: Option<&Arc<PowerCurveStore>>) {

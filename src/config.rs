@@ -40,7 +40,15 @@ pub(crate) const POWER_CURVE_MIN_BUCKETS: usize = 6;
 /// 1.005 = next gear must deliver at least 0.5 % more power.
 /// Prevents premature shifts on flat power curves (EVs, turbo plateau, noisy data).
 pub(crate) const SHIFT_POWER_GAIN_RATIO: f64 = 1.005;
-pub(crate) const SHIFT_CACHE_STRATEGY_VERSION: i64 = 6; // bump when the shift strategy changes to force a recalculation
+/// Bump when the shift strategy changes to force a recalculation of all cached
+/// shift points.  Stored per car-curve, not at the file level.
+pub(crate) const SHIFT_CACHE_STRATEGY_VERSION: i64 = 6;
+/// Schema version for the on-disk power_curves.json file.
+/// Governs structural changes to the JSON layout (added/removed top-level keys,
+/// renamed fields) — distinct from SHIFT_CACHE_STRATEGY_VERSION which triggers
+/// algorithm recompute on a per-curve basis.  Increment this when the file
+/// structure changes; migrate_schema() handles the transition.
+pub(crate) const SHIFT_CACHE_SCHEMA_VERSION: u64 = 1;
 pub(crate) const MAX_PLAUSIBLE_LEARNED_GEAR: i64 = 10;
 pub(crate) const SHIFT_DROP_MIN_RATIO: f64 = 0.35;
 pub(crate) const SHIFT_DROP_MAX_RATIO: f64 = 0.92;
