@@ -51,10 +51,17 @@ pub(crate) const IDLE_RPM_SIGNATURE_TOLERANCE: f64 = 0.25;
 pub(crate) const POWER_SIGNATURE_TOLERANCE: f64 = 0.25;
 pub(crate) const SHIFT_CACHE_VALID_POWER_TOLERANCE: f64 = 0.05;
 pub(crate) const SHIFT_CACHE_INVALID_POWER_TOLERANCE: f64 = 0.15;
-/// Minimum RPM swing (half-amplitude) needed to count as a direction reversal at the limiter.
-pub(crate) const LIMITER_BOUNCE_MIN_AMPLITUDE: f64 = 30.0;
-/// Maximum swing per half-oscillation — larger drops are gear changes, not limiter bounce.
-pub(crate) const LIMITER_BOUNCE_MAX_AMPLITUDE: f64 = 400.0;
+/// Minimum reversal amplitude as a fraction of the engine's maxRpm.
+/// Calibrated so a typical 8 000 RPM car keeps the historic 30 RPM floor
+/// (30 / 8000 = 0.00375), while a low-revving 5 000 RPM engine uses ~19 RPM,
+/// letting it accumulate the required reversals even though its limiter
+/// oscillation is tighter than the old fixed 30 RPM threshold.
+pub(crate) const LIMITER_BOUNCE_MIN_AMPLITUDE_RATIO: f64 = 0.00375; // ≈ 30 RPM at 8 000 RPM
+/// Maximum swing per half-oscillation, as a fraction of maxRpm.
+/// Anything larger is more likely a gear change than a limiter bounce.
+/// At 8 000 RPM this equals the historic 400 RPM (400 / 8000 = 0.05); at
+/// 12 000 RPM it allows 600 RPM, matching hard-cut limiters on high-rev engines.
+pub(crate) const LIMITER_BOUNCE_MAX_AMPLITUDE_RATIO: f64 = 0.05; // ≈ 400 RPM at 8 000 RPM
 /// Time window in seconds within which direction reversals are counted.
 pub(crate) const LIMITER_BOUNCE_WINDOW: f64 = 1.0;
 /// Number of direction reversals required to confirm the limiter.

@@ -323,7 +323,7 @@ impl PowerCurveStore {
             }
 
             if accel >= FULL_THROTTLE_MIN && rpm >= high_rpm_threshold {
-                if let Some(detected) = detect_limiter_bounce(curve, rpm, now) {
+                if let Some(detected) = detect_limiter_bounce(curve, rpm, now, max_rpm) {
                     let current_max = get_curve_f64(curve, "maxObservedRpm");
                     let needs_down = detected < current_max * (1.0 - LIMITER_CORRECT_TOLERANCE);
                     let needs_up = detected > current_max;
@@ -1057,11 +1057,25 @@ pub(crate) fn enrich_shift_data(payload: &mut Value, power_curves: Option<&Arc<P
 /// Detects the characteristic RPM oscillation at the rev limiter.
 ///
 /// On the rising edge, the local peak (refRpm) is tracked. Once RPM drops by
-/// MIN_AMPLITUDE below that peak, a direction reversal is recorded (now falling).
+/// min_amp below that peak, a direction reversal is recorded (now falling).
 /// On the falling edge the local trough is tracked symmetrically.
 /// After LIMITER_BOUNCE_MIN_COUNT reversals within LIMITER_BOUNCE_WINDOW seconds
 /// the limiter is confirmed; the return value is the highest RPM seen in that window.
-fn detect_limiter_bounce(curve: &mut Map<String, Value>, rpm: f64, now: f64) -> Option<f64> {
+///
+/// Amplitude bounds are derived from max_rpm so the detector works across the full
+/// range of car types — see LIMITER_BOUNCE_MIN_AMPLITUDE_RATIO / MAX_AMPLITUDE_RATIO.
+fn detect_limiter_bounce(
+    curve: &mut Map<String, Value>,
+    rpm: f64,
+    now: f64,
+    max_rpm: f64,
+) -> Option<f64> {
+    // Scale the amplitude window to the engine's RPM band.  A 15 RPM hard floor
+    // prevents pathological behaviour on near-zero max_rpm inputs from demo data.
+    let min_amp = (max_rpm * LIMITER_BOUNCE_MIN_AMPLITUDE_RATIO).max(15.0);
+    // Ensure max_amp is always meaningfully larger than min_amp so the window
+    // isn't accidentally collapsed on very low-revving engines.
+    let max_amp = (max_rpm * LIMITER_BOUNCE_MAX_AMPLITUDE_RATIO).max(min_amp * 2.0);
     let bounce = curve.get("limiterBounce").cloned().unwrap_or(Value::Null);
     let prev_dir = get_child_f64(&bounce, "dir"); // +1 rising, -1 falling, 0 initial
     let ref_rpm = {
@@ -1087,7 +1101,7 @@ fn detect_limiter_bounce(curve: &mut Map<String, Value>, rpm: f64, now: f64) -> 
     let (new_dir, new_ref, direction_changed) = if rising {
         let new_ref = ref_rpm.max(rpm); // track local peak
         let drop = new_ref - rpm;
-        if drop >= LIMITER_BOUNCE_MIN_AMPLITUDE && drop <= LIMITER_BOUNCE_MAX_AMPLITUDE {
+        if drop >= min_amp && drop <= max_amp {
             (-1.0_f64, rpm, true) // direction reversal: now falling
         } else {
             (1.0_f64, new_ref, false)
@@ -1095,7 +1109,7 @@ fn detect_limiter_bounce(curve: &mut Map<String, Value>, rpm: f64, now: f64) -> 
     } else {
         let new_ref = ref_rpm.min(rpm); // track local trough
         let rise = rpm - new_ref;
-        if rise >= LIMITER_BOUNCE_MIN_AMPLITUDE && rise <= LIMITER_BOUNCE_MAX_AMPLITUDE {
+        if rise >= min_amp && rise <= max_amp {
             (1.0_f64, rpm, true) // direction reversal: now rising
         } else {
             (-1.0_f64, new_ref, false)
@@ -1479,18 +1493,20 @@ mod tests {
     }
 
     // ── detect_limiter_bounce ─────────────────────────────────────────────────
+    // All tests that need identical results to the old fixed-constant behaviour
+    // pass max_rpm = 8 000.0, giving min_amp ≈ 30 RPM and max_amp = 400 RPM.
 
     #[test]
     fn limiter_bounce_confirms_after_three_reversals() {
         let mut curve = Map::new();
         // t=0.00: rising phase starts, no reversal yet
-        assert_eq!(detect_limiter_bounce(&mut curve, 8100.0, 0.00), None);
-        // t=0.15: drop of 40 RPM (>= MIN_AMPLITUDE=30) → first reversal
-        assert_eq!(detect_limiter_bounce(&mut curve, 8060.0, 0.15), None);
+        assert_eq!(detect_limiter_bounce(&mut curve, 8100.0, 0.00, 8000.0), None);
+        // t=0.15: drop of 40 RPM (>= min_amp≈30) → first reversal
+        assert_eq!(detect_limiter_bounce(&mut curve, 8060.0, 0.15, 8000.0), None);
         // t=0.30: rise of 45 RPM → second reversal
-        assert_eq!(detect_limiter_bounce(&mut curve, 8105.0, 0.30), None);
+        assert_eq!(detect_limiter_bounce(&mut curve, 8105.0, 0.30, 8000.0), None);
         // t=0.45: drop of 50 RPM → third reversal → CONFIRMED
-        let result = detect_limiter_bounce(&mut curve, 8055.0, 0.45);
+        let result = detect_limiter_bounce(&mut curve, 8055.0, 0.45, 8000.0);
         assert!(result.is_some(), "expected confirmation, got None");
         let peak = result.unwrap();
         // Peak should be the highest RPM seen in the window (8105)
@@ -1499,31 +1515,66 @@ mod tests {
 
     #[test]
     fn limiter_bounce_not_triggered_with_too_large_swings() {
-        // Swings > LIMITER_BOUNCE_MAX_AMPLITUDE (400) are gear changes, not limiter bounce
+        // Swings > max_amp (400 at 8 000 RPM) are gear changes, not limiter bounce.
         let mut curve = Map::new();
-        assert_eq!(detect_limiter_bounce(&mut curve, 8000.0, 0.00), None);
+        assert_eq!(detect_limiter_bounce(&mut curve, 8000.0, 0.00, 8000.0), None);
         // Drop of 500 RPM — exceeds max amplitude, no reversal counted
-        assert_eq!(detect_limiter_bounce(&mut curve, 7500.0, 0.15), None);
-        assert_eq!(detect_limiter_bounce(&mut curve, 8000.0, 0.30), None);
-        assert_eq!(detect_limiter_bounce(&mut curve, 7500.0, 0.45), None);
+        assert_eq!(detect_limiter_bounce(&mut curve, 7500.0, 0.15, 8000.0), None);
+        assert_eq!(detect_limiter_bounce(&mut curve, 8000.0, 0.30, 8000.0), None);
+        assert_eq!(detect_limiter_bounce(&mut curve, 7500.0, 0.45, 8000.0), None);
     }
 
     #[test]
     fn limiter_bounce_resets_outside_window() {
         let mut curve = Map::new();
-        assert_eq!(detect_limiter_bounce(&mut curve, 8100.0, 0.0), None);
-        assert_eq!(detect_limiter_bounce(&mut curve, 8060.0, 0.15), None); // reversal 1
+        assert_eq!(detect_limiter_bounce(&mut curve, 8100.0, 0.0, 8000.0), None);
+        assert_eq!(detect_limiter_bounce(&mut curve, 8060.0, 0.15, 8000.0), None); // reversal 1
         // Next sample is 2 seconds later — outside the 1-second window
         // The bounce counter should reset so we never reach MIN_COUNT within
         // a single window, and confirmation should not fire.
-        assert_eq!(detect_limiter_bounce(&mut curve, 8105.0, 2.30), None); // reversal 1 (reset)
-        assert_eq!(detect_limiter_bounce(&mut curve, 8060.0, 2.45), None); // reversal 2
+        assert_eq!(detect_limiter_bounce(&mut curve, 8105.0, 2.30, 8000.0), None); // reversal 1 (reset)
+        assert_eq!(detect_limiter_bounce(&mut curve, 8060.0, 2.45, 8000.0), None); // reversal 2
         // Still only 2 reversals in new window — no confirmation yet
-        let r = detect_limiter_bounce(&mut curve, 8110.0, 2.60);
+        let r = detect_limiter_bounce(&mut curve, 8110.0, 2.60, 8000.0);
         // reversal 3 from 2.30 to now is within window → may confirm
         // If within window (2.60-2.30=0.30 ≤ 1.0), this is reversal 3 → confirmed
         // We just assert it doesn't panic
         let _ = r;
+    }
+
+    #[test]
+    fn limiter_bounce_tight_oscillation_low_rev_car() {
+        // 5 000 RPM car; limiter oscillates ±20 RPM.
+        // Old fixed 30 RPM floor would never count these reversals.
+        // Adaptive min_amp = 5000 * 0.00375 = 18.75 RPM → swings of 20 should count.
+        let max_rpm = 5000.0;
+        let mut curve = Map::new();
+        assert_eq!(detect_limiter_bounce(&mut curve, 4900.0, 0.00, max_rpm), None);
+        // Drop of 20 RPM ≥ 18.75 → reversal 1
+        assert_eq!(detect_limiter_bounce(&mut curve, 4880.0, 0.15, max_rpm), None);
+        // Rise of 20 RPM → reversal 2
+        assert_eq!(detect_limiter_bounce(&mut curve, 4900.0, 0.30, max_rpm), None);
+        // Drop of 20 RPM → reversal 3 → CONFIRMED
+        let result = detect_limiter_bounce(&mut curve, 4880.0, 0.45, max_rpm);
+        assert!(result.is_some(), "tight-oscillation low-rev car should confirm");
+    }
+
+    #[test]
+    fn limiter_bounce_hard_cut_high_rev_car_not_mistaken_for_bounce() {
+        // 12 000 RPM car; rev limiter hard-cuts 550 RPM.
+        // Old fixed 400 RPM ceiling would classify this as "too large → gear change".
+        // Adaptive max_amp = 12000 * 0.05 = 600 RPM → 550 fits inside the window.
+        // Three 550 RPM swings should confirm the limiter, NOT be counted as upshifts.
+        let max_rpm = 12_000.0;
+        let mut curve = Map::new();
+        assert_eq!(detect_limiter_bounce(&mut curve, 11800.0, 0.00, max_rpm), None);
+        // Drop of 550 RPM ≤ 600 (max_amp) → reversal 1
+        assert_eq!(detect_limiter_bounce(&mut curve, 11250.0, 0.15, max_rpm), None);
+        // Rise of 550 RPM → reversal 2
+        assert_eq!(detect_limiter_bounce(&mut curve, 11800.0, 0.30, max_rpm), None);
+        // Drop of 550 RPM → reversal 3 → CONFIRMED (not misread as an upshift)
+        let result = detect_limiter_bounce(&mut curve, 11250.0, 0.45, max_rpm);
+        assert!(result.is_some(), "hard-cut high-rev car should confirm limiter, not be an upshift");
     }
 
     // ── power_curve_key ───────────────────────────────────────────────────────
