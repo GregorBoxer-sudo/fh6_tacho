@@ -5,6 +5,68 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.0] — 2026-05-29
+
+### New
+
+- **Shift-learning badge** — the dashboard now shows a small status badge next to
+  the shift indicator: `LEARNING N/6` while the power curve is still being built,
+  `OPTIMAL` once the learned shift point is active.  Lets you see at a glance whether
+  the tachometer is using the conservative safety estimate or the car-specific optimum.
+
+### Bug fixes — shift learning
+
+- **Gear-drop sample gate** — the learned drop ratio is no longer trusted until at
+  least two consistent gear-drop measurements have been recorded (`SHIFT_DROP_MIN_SAMPLES = 2`).
+  A single outlier first shift (clutch slip, mid-corner lift) can no longer immediately
+  skew the shift point for that gear.
+- **Adaptive limiter-bounce amplitude bounds** — the minimum and maximum reversal
+  amplitude for rev-limiter detection are now scaled as a fraction of `maxRpm` instead
+  of using fixed RPM values.  Low-revving cars (≤ 5 000 RPM) previously missed their
+  limiter oscillations (too tight for the old 30 RPM floor); high-rev engines
+  (≥ 12 000 RPM) now allow proportionally larger swings without misclassifying hard-cut
+  limiters as gear changes.
+- **Neutral gear display** — the tachometer gear indicator now shows `N` when the car
+  is in neutral (Forza sends gear = 255).  Previously it held the last driven gear.
+- **`confirmedLimiterRpm` payload field** — was always equal to `observedLimitRpm`;
+  now correctly carries the bounce-detection-confirmed ceiling value (non-zero only
+  after a downward correction is confirmed).
+
+### Bug fixes — data safety
+
+- **Rolling backup on save** — the learned shift cache (`power_curves.json`) is now
+  backed up to `power_curves.json.bak` before each atomic write.  A crash or full disk
+  between write steps always leaves a usable file.
+- **Loud parse-error recovery** — if `power_curves.json` cannot be parsed on startup,
+  the error is printed to stderr and the backup is tried automatically before falling
+  back to an empty store.  Previously this failed silently.
+- **Schema version field** — `power_curves.json` now includes a top-level
+  `"schemaVersion"` field (currently `1`) to enable structured migration of stored
+  data in future releases.
+- **Atomic rename logged** — a failed `.tmp` → main rename now prints an error instead
+  of being silently dropped.
+
+### Improvements
+
+- **Single source of truth for shift math** — all shift-point and LED thresholds
+  (`ledFillRpm`, `shiftFlashReleaseGap`, `source`) are now computed once in
+  `enrich_shift_data()` and consumed by both the egui overlay and the web dashboard.
+  The 13 duplicated JS constants and 5 duplicated computation functions have been
+  removed from `app.js`; the egui overlay no longer re-derives the same values from
+  `shiftNowRpm`.
+
+### Chores / housekeeping
+
+- All user-visible strings are now English (`src/main.rs` had several German messages).
+- `*.tmp` added to `.gitignore` as a safety net for atomic-write temp files.
+- `build.rs` now emits a Cargo warning whenever `static/` assets change, reminding
+  developers to bump `CACHE_NAME` in `sw.js`.
+- README: added Security / Network section and SSE buffer-capacity note.
+- Clippy: collapsible-if warnings resolved using `let_chains` (edition 2024);
+  warning count reduced from 7 to 1.
+
+---
+
 ## [0.5.2] — 2026-05-27
 
 ### Analytics
