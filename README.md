@@ -352,6 +352,16 @@ If `map_calibration.json` is missing, the embedded default calibration is used.
 
 ---
 
+## Security / Network
+
+forza-tacho is designed for **trusted home networks only**.
+
+- The HTTP server and UDP listener bind to `0.0.0.0` by default, making the dashboard reachable by **any device on the same network**. Data exposed includes live position, track line, lap times, and cars driven.
+- There is **no authentication** on the HTTP API, including the `/settings` and `/preview-sound` endpoints. The `map.calibration` POST is the only mutation and requires `--debug`.
+- On untrusted networks (public Wi-Fi, LAN parties), enable **Local-only mode** in the launcher settings — or pass `--local-only` on the command line — to bind to `127.0.0.1` so the dashboard is only reachable from the same PC.
+
+---
+
 ## Overlay on KDE Wayland
 
 <details>
@@ -385,6 +395,8 @@ Forza streams telemetry at 60 packets/second (~324 bytes each).
 | Runtime dependencies | **Zero** — single self-contained binary |
 
 File I/O is fully decoupled from the hot path via a bounded background channel — the UDP receive thread never blocks on a syscall. Session writes are batched with `BufWriter`.
+
+The SSE broadcast channel has a capacity of **32 frames**. A very slow client or many simultaneous dashboard windows may see dropped telemetry frames, which is acceptable for a tachometer display.
 
 </details>
 
