@@ -94,10 +94,8 @@ impl RecorderState {
             .unwrap_or(false);
 
         // Race ended — flush and close so subsequent data starts a fresh session.
-        if self.last_race_on == Some(true) && !race_on {
-            if let Some(mut f) = self.file.take() {
-                let _ = f.flush();
-            }
+        if self.last_race_on == Some(true) && !race_on && let Some(mut f) = self.file.take() {
+            let _ = f.flush();
         }
 
         let race_started = self.last_race_on == Some(false) && race_on;

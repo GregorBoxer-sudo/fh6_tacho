@@ -438,20 +438,14 @@ async fn api_post_settings(
 ) -> Json<Value> {
     use crate::settings::is_valid_sound;
     let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if let Some(us) = body.unit_system {
-        if us == "metric" || us == "imperial" {
-            s.unit_system = us;
-        }
+    if let Some(us) = body.unit_system && (us == "metric" || us == "imperial") {
+        s.unit_system = us;
     }
-    if let Some(snd) = body.shift_sound_web {
-        if is_valid_sound(&snd) {
-            s.shift_sound_web = snd;
-        }
+    if let Some(snd) = body.shift_sound_web && is_valid_sound(&snd) {
+        s.shift_sound_web = snd;
     }
-    if let Some(snd) = body.shift_sound_backend {
-        if is_valid_sound(&snd) {
-            s.shift_sound_backend = snd;
-        }
+    if let Some(snd) = body.shift_sound_backend && is_valid_sound(&snd) {
+        s.shift_sound_backend = snd;
     }
     *state.settings.lock().unwrap_or_else(|e| e.into_inner()) = s.clone();
     let _ = save_settings(&state.data_dir.join("settings.json"), &s);

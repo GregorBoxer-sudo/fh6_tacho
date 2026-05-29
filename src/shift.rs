@@ -133,8 +133,13 @@ impl PowerCurveStore {
                     }
                     // Steps 2–3: write to .tmp then atomic rename.
                     let tmp = path.with_extension("tmp");
-                    if fs::write(&tmp, &json).is_ok() {
-                        let _ = fs::rename(&tmp, &path);
+                    if fs::write(&tmp, &json).is_ok()
+                        && let Err(e) = fs::rename(&tmp, &path)
+                    {
+                        eprintln!(
+                            "shift-cache: atomic rename {} → {} failed: {e}",
+                            tmp.display(), path.display()
+                        );
                     }
                 }
             })
@@ -385,7 +390,6 @@ impl PowerCurveStore {
                 let b_dir    = get_child_f64(&bounce_state, "dir");
                 let b_ref    = get_child_f64(&bounce_state, "refRpm");
                 let cur_max  = get_curve_f64(curve, "maxObservedRpm");
-                let in_zone  = accel >= FULL_THROTTLE_MIN && rpm >= high_rpm_threshold;
                 let reason   = if accel < FULL_THROTTLE_MIN {
                     format!("throttle={:.3} < {:.2} (not full)", accel, FULL_THROTTLE_MIN)
                 } else if rpm < high_rpm_threshold {
@@ -400,7 +404,7 @@ impl PowerCurveStore {
                     rpm, max_rpm, accel, high_rpm_threshold,
                     if is_power_limited_gear { "gear" } else { "global" },
                     gear_peak, cur_max,
-                    if in_zone { &reason } else { &reason },
+                    &reason,
                 );
             }
 
@@ -1148,8 +1152,9 @@ pub(crate) fn enrich_shift_data(payload: &mut Value, power_curves: Option<&Arc<P
     engine.insert("limitRpm".to_string(), json!(limit_rpm));
     engine.insert("redlineRpm".to_string(), json!(redline_rpm));
     engine.insert("observedLimitRpm".to_string(), json!(observed_limit));
-    // observed_limit is already maxObservedRpm after all bounce corrections.
-    engine.insert("confirmedLimiterRpm".to_string(), json!(observed_limit));
+    // bounce_confirmed is non-zero only when limiter-bounce detection has confirmed
+    // a downward correction; 0 means "not yet confirmed by bounce detection".
+    engine.insert("confirmedLimiterRpm".to_string(), json!(bounce_confirmed));
     // Running bounce counter: 0 = outside limiter zone, 1-2 = being detected,
     // 3 = confirmed (immediately reset to 0, so the next frame reads 0 again).
     engine.insert("limiterBounceCount".to_string(), json!(bounce_count));

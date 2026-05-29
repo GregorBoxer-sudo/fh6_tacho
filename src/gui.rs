@@ -663,10 +663,8 @@ impl eframe::App for ForzaTachoApp {
                 &mut self.shift_flash_gear,
             );
             // false → true edge: fire the backend shift sound (if configured).
-            if !prev_flash && led.flash {
-                if let Ok(s) = self.settings.lock() {
-                    crate::audio::play_shift_sound(&s.shift_sound_backend);
-                }
+            if !prev_flash && led.flash && let Ok(s) = self.settings.lock() {
+                crate::audio::play_shift_sound(&s.shift_sound_backend);
             }
         }
 

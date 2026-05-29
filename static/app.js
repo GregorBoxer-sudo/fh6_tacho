@@ -66,7 +66,7 @@ let latest = null;
 let lastRender = 0;
 let lastMessageAt = 0;
 let connected = false;
-let lastGearText = "0";
+let lastGearText = "N";
 let learnedMaxRpm = 0;
 let rpmWasReset = false;
 let peakG = 0;
@@ -114,7 +114,8 @@ function lapTime(value, allowZero = false) {
 
 function displayLapNumber(data) {
   // Forza delivers lap.number 0-based (Lap 1 = 0, Lap 2 = 1, ...)
-  const rawLap = Number(data.lap?.number) ?? -1;
+  const rawLapNum = data.lap?.number;
+  const rawLap = rawLapNum != null ? Number(rawLapNum) : -1;
   if (rawLap >= 0 && data.raceOn) return int(rawLap + 1);
   const currentTime = Number(data.lap?.current) || 0;
   const distance = Number(data.lap?.distance) || 0;
@@ -148,13 +149,14 @@ function signedDeg(value) {
 function gearLabel(gear) {
   if (gear === 0) {
     lastGearText = "R";
-    return lastGearText;
+    return "R";
   }
   if (gear >= 1 && gear <= 10) {
     lastGearText = String(gear);
     return lastGearText;
   }
-  return lastGearText;
+  // Forza sends 255 (0xFF) for neutral; any other unknown value also shows "N".
+  return "N";
 }
 
 function setConnection(live) {
