@@ -59,6 +59,7 @@ const els = {
     rr: Array.from(document.querySelectorAll(".slipRR i")),
   },
   shiftLeds: Array.from(document.querySelectorAll(".shift .led")),
+  learnBadge: $("learnBadge"),
 };
 
 let latest = null;
@@ -376,6 +377,27 @@ function updateLapDerived(lap) {
   els.lapDelta.classList.toggle("bad", Number.isFinite(delta) && delta > 0);
 }
 
+function updateLearnBadge(engine, raceOff) {
+  if (!els.learnBadge) return;
+  if (raceOff || !engine) {
+    els.learnBadge.textContent = "";
+    els.learnBadge.dataset.state = "";
+    return;
+  }
+  const src  = engine.source || "safety";
+  const prog = engine.learnProgress;
+  if (src === "learned" || src === "learned_capped") {
+    els.learnBadge.textContent = src === "learned_capped" ? "OPTIMAL*" : "OPTIMAL";
+    els.learnBadge.dataset.state = "optimal";
+  } else if (prog && prog.buckets < prog.bucketsNeeded) {
+    els.learnBadge.textContent = `LEARNING ${prog.buckets}/${prog.bucketsNeeded}`;
+    els.learnBadge.dataset.state = "learning";
+  } else {
+    els.learnBadge.textContent = "";
+    els.learnBadge.dataset.state = "";
+  }
+}
+
 function render(now) {
   requestAnimationFrame(render);
   if (!latest || now - lastRender < 16) return;
@@ -417,6 +439,8 @@ function render(now) {
     led.classList.toggle("shiftNow", shiftFlash);
     led.classList.toggle("shiftFlashOn", shiftFlashOn);
   });
+
+  updateLearnBadge(latest.engine, !raceDataActive);
 
   els.drivetrain.textContent = latest.car.drivetrain;
   els.fuel.textContent = fuelText(latest.fuel);

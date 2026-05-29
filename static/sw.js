@@ -1,4 +1,6 @@
-const CACHE_NAME = "forza-tacho-v92";
+// IMPORTANT: bump this version whenever any file in ASSETS changes.
+// Failure to do so means PWA users keep serving stale cached assets.
+const CACHE_NAME = "forza-tacho-v93";
 const ASSETS = [
   "/",
   "/index.html",

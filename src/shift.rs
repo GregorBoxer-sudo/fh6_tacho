@@ -876,6 +876,40 @@ impl PowerCurveStore {
             logger.log_shift_decision(payload, fields);
         }
     }
+
+    /// Returns the current learning progress for the active car / gear as
+    /// (filled_bucket_count, has_drop_ratio).  A bucket is "filled" when it
+    /// has been observed on at least 2 distinct full-throttle runs (the same
+    /// threshold used by compute_power_shift_rpm).  has_drop_ratio is true
+    /// when at least one upshift sample has been recorded for the current gear.
+    pub(crate) fn learn_progress(&self, payload: &Value) -> (usize, bool) {
+        let key = power_curve_key(payload);
+        let gear = learned_forward_gear(payload);
+        if key.is_empty() || gear <= 0 {
+            return (0, false);
+        }
+        let curves = self.curves.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(curve) = curves.get(&key).and_then(Value::as_object) else {
+            return (0, false);
+        };
+        let bucket_count = curve
+            .get("buckets")
+            .and_then(Value::as_object)
+            .map(|buckets| {
+                buckets
+                    .values()
+                    .filter(|v| get_child_i64(v, "samples") >= 2)
+                    .count()
+            })
+            .unwrap_or(0);
+        let has_drop_ratio = curve
+            .get("gearDropRatios")
+            .and_then(Value::as_object)
+            .and_then(|d| d.get(&format!("{gear}>{}", gear + 1)))
+            .map(|p| get_child_i64(p, "samples") >= 1)
+            .unwrap_or(false);
+        (bucket_count, has_drop_ratio)
+    }
 }
 
 fn compute_power_shift_rpm(
@@ -1153,6 +1187,21 @@ pub(crate) fn enrich_shift_data(payload: &mut Value, power_curves: Option<&Arc<P
             1.0
         }),
     );
+    // Learning progress for the current car + gear so the frontend can show
+    // whether the shift point is the conservative safety estimate or the
+    // learned optimum, and how far along the learning process is.
+    if let Some(store) = power_curves {
+        let (buckets, has_drop_ratio) = store.learn_progress(payload);
+        let engine = ensure_path_object(payload, &["engine"]);
+        engine.insert(
+            "learnProgress".to_string(),
+            json!({
+                "buckets":       buckets,
+                "bucketsNeeded": POWER_CURVE_MIN_BUCKETS,
+                "hasDropRatio":  has_drop_ratio,
+            }),
+        );
+    }
     let electric = is_electric(payload);
     let car = ensure_path_object(payload, &["car"]);
     car.insert("maxObservedGear".to_string(), json!(max_observed_gear));

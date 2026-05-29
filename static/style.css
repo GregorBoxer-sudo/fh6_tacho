@@ -250,6 +250,24 @@ button.topLink {
   width: min(620px, 64%);
 }
 
+/* Shift-learning state badge — sits just below the LED bar, centered.
+   Appears only when relevant; empty content → zero height via min-height:0. */
+.learn-badge {
+  position: absolute;
+  top: 50px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.learn-badge[data-state="optimal"]  { color: #4cff72; }
+.learn-badge[data-state="learning"] { color: #7a8a92; }
+
 .warnings {
   position: absolute;
   top: 7px;
