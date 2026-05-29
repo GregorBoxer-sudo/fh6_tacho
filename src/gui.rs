@@ -201,6 +201,10 @@ fn paint_leds(painter: &egui::Painter, rect: egui::Rect, state: &LedState) {
 
 // ── Overlay viewport UI ───────────────────────────────────────────────────────
 
+// TODO(egui-upgrade): CentralPanel::show(ctx, …) is deprecated in eframe 0.34
+// in favour of CentralPanel::show_inside(ui, …), but show_inside needs a parent
+// &mut egui::Ui which is not available at viewport-root level.  Revisit when
+// upgrading eframe past 0.34 — the recommended top-level API may change.
 #[allow(deprecated)]
 fn overlay_ui(ctx: &egui::Context, state: &LedState, close_signal: &Arc<AtomicBool>) {
     // Repaint fast during racing so the LEDs track 60 Hz telemetry.

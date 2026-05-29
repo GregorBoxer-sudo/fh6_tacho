@@ -12,8 +12,6 @@ use crate::logging::ShiftCacheLogger;
 use crate::util::*;
 
 pub(crate) struct PowerCurveStore {
-    #[allow(dead_code)]
-    path: PathBuf,
     curves: Mutex<Map<String, Value>>,
     logger: Option<Arc<ShiftCacheLogger>>,
     limiter_log: bool,
@@ -34,9 +32,8 @@ impl PowerCurveStore {
     ) -> Self {
         let path = path.into();
         let curves = Self::load_curves(&path);
-        let save_tx = Self::spawn_save_worker(path.clone());
+        let save_tx = Self::spawn_save_worker(path);
         Self {
-            path,
             curves: Mutex::new(curves),
             logger,
             limiter_log,

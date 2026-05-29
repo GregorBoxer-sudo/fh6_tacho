@@ -110,6 +110,7 @@ pub(crate) const SHIFT_DROP_MIN_SAMPLES: i64 = 2;
 ///
 /// Interpretation: two ratios are "consistent" if they agree within ±6 %
 /// of the larger one (e.g. 0.65 → acceptable range 0.611 – 0.689).
+#[allow(dead_code)] // not yet wired in; reserved for future variance-based consistency gate
 pub(crate) const SHIFT_DROP_CONSISTENCY_TOLERANCE: f64 = 0.06;
 pub(crate) const SHIFT_CACHE_VALIDATION_RPM_WINDOW: f64 = 300.0;
 /// Minimum number of distinct ascending runs through a power-curve bucket before
