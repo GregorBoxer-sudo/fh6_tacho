@@ -82,28 +82,6 @@ let shiftFlashGear = 0;
 
 const PEAK_G_DECAY = 0.995;
 const PEAK_DRIFT_DECAY = 0.998;
-const DEFAULT_ENGINE_LIMIT_RATIO_OF_TACHO_MAX = 0.895;
-const REDLINE_RATIO_OF_ENGINE_LIMIT = 1 - 500 / (9000 - 750);
-const SAFETY_SHIFT_TARGET_RATIO_OF_ENGINE_LIMIT = 0.995;
-const LOW_GEAR_SAFETY_SHIFT_TARGET_RATIOS = {
-  1: 0.98,
-  2: 0.985,
-  3: 0.99,
-};
-const SHIFT_WARNING_LEAD_SECONDS = 0.20;
-const LOW_GEAR_SHIFT_WARNING_LEAD_SECONDS = {
-  1: 0.22,
-  2: 0.22,
-  3: 0.20,
-};
-const SHIFT_WARNING_FALLBACK_GAP_RATIO = 0.012;
-const SHIFT_WARNING_MIN_GAP_RPM = 100;
-const SHIFT_WARNING_MAX_FALLBACK_GAP_RPM = 220;
-const SHIFT_WARNING_MAX_DYNAMIC_GAP_RPM = 800;
-const SAFETY_SHIFT_WARNING_FALLBACK_BAND_RATIO = 0.065;
-const SAFETY_SHIFT_WARNING_MAX_BAND_RATIO = 0.18;
-const SHIFT_WARNING_MIN_RPM_RATE = 350;
-const SHIFT_WARNING_MAX_RPM_RATE = 14000;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -178,60 +156,6 @@ function gearLabel(gear) {
   return lastGearText;
 }
 
-function safetyShiftTargetRatio(gear) {
-  return LOW_GEAR_SAFETY_SHIFT_TARGET_RATIOS[gear] || SAFETY_SHIFT_TARGET_RATIO_OF_ENGINE_LIMIT;
-}
-
-function shiftWarningLeadSeconds(gear) {
-  return LOW_GEAR_SHIFT_WARNING_LEAD_SECONDS[gear] || SHIFT_WARNING_LEAD_SECONDS;
-}
-
-function fallbackShiftWarningGap(shiftRpm) {
-  return clamp(
-    shiftRpm * SHIFT_WARNING_FALLBACK_GAP_RATIO,
-    SHIFT_WARNING_MIN_GAP_RPM,
-    SHIFT_WARNING_MAX_FALLBACK_GAP_RPM,
-  );
-}
-
-function dynamicShiftWarningRpm(shiftRpm, rpmRate, leadSeconds) {
-  if (shiftRpm <= 0) return 0;
-  let gap = fallbackShiftWarningGap(shiftRpm);
-  if (rpmRate >= SHIFT_WARNING_MIN_RPM_RATE && rpmRate <= SHIFT_WARNING_MAX_RPM_RATE) {
-    gap = clamp(
-      rpmRate * leadSeconds,
-      SHIFT_WARNING_MIN_GAP_RPM,
-      SHIFT_WARNING_MAX_DYNAMIC_GAP_RPM,
-    );
-  }
-  return Math.max(0, shiftRpm - gap);
-}
-
-function safetyShiftWarningRpm(shiftRpm, rpmRate, leadSeconds, idleRpm) {
-  if (shiftRpm <= 0) return 0;
-  const usableBand = Math.max(1000, shiftRpm - Math.max(0, idleRpm || 0));
-  const maxGap = clamp(
-    usableBand * SAFETY_SHIFT_WARNING_MAX_BAND_RATIO,
-    SHIFT_WARNING_MAX_DYNAMIC_GAP_RPM,
-    usableBand * 0.35,
-  );
-  // Fallback band gap as a floor for the dynamic gap:
-  // At slow rev build-up (small rpm_rate), clamp(rate*lead, 100, max)
-  // would collapse to only 100 RPM — dangerously close to the real limiter.
-  // The fallback band gap is proportional to the usable RPM band and therefore
-  // always a sensible minimum distance.
-  const fallbackGap = clamp(
-    usableBand * SAFETY_SHIFT_WARNING_FALLBACK_BAND_RATIO,
-    SHIFT_WARNING_MIN_GAP_RPM,
-    maxGap,
-  );
-  let gap = fallbackGap;
-  if (rpmRate >= SHIFT_WARNING_MIN_RPM_RATE && rpmRate <= SHIFT_WARNING_MAX_RPM_RATE) {
-    gap = clamp(rpmRate * leadSeconds, fallbackGap, maxGap);
-  }
-  return Math.max(0, shiftRpm - gap);
-}
-
 function setConnection(live) {
   if (live === connected) return;
   connected = live;
@@ -283,39 +207,44 @@ function resetLearnedRpm() {
   });
 }
 
+// Returns only what a renderer needs; all shift thresholds come from the backend.
 function rpmScale(engine) {
   const rpm = Math.max(0, engine.rpm || 0);
   if (rpm > learnedMaxRpm) {
     learnedMaxRpm = rpm;
     rpmWasReset = false;
   }
-
-  const idle = Math.max(0, engine.idleRpm || 0);
-  const telemetryMax = Math.max(0, engine.maxRpm || 0);
-  const fallback = Math.max(3000, idle * 2.5, rpm);
-  const maxRpm = telemetryMax >= 3000 ? telemetryMax : Math.max(learnedMaxRpm, fallback);
-  const telemetryLimit = Math.max(0, engine.limitRpm || 0);
-  const telemetryRedline = Math.max(0, engine.redlineRpm || 0);
-  const limitRpm = telemetryLimit > idle + 1000 ? telemetryLimit : Math.max(idle + 1000, maxRpm * DEFAULT_ENGINE_LIMIT_RATIO_OF_TACHO_MAX);
-  const redlineRpm = telemetryRedline > idle + 1000 ? telemetryRedline : Math.max(idle + 1000, limitRpm * REDLINE_RATIO_OF_ENGINE_LIMIT);
-  const telemetryShiftNow = Number(engine.shiftNowRpm);
-  const gear = Number(latest?.controls?.gear) || 0;
-  const rpmRate = Number(engine.rpmRiseRate) || 0;
-  const fallbackShiftTargetRpm = limitRpm * safetyShiftTargetRatio(gear);
-  const shiftNowRpm = Number.isFinite(telemetryShiftNow) && telemetryShiftNow > idle + 1000
-    ? telemetryShiftNow
-    : safetyShiftWarningRpm(fallbackShiftTargetRpm, rpmRate, shiftWarningLeadSeconds(gear), idle);
+  const maxRpm    = Math.max(0, engine.maxRpm    || 0) || Math.max(learnedMaxRpm, 3000);
+  const limitRpm  = Math.max(0, engine.limitRpm  || 0);
+  const redlineRpm = Math.max(0, engine.redlineRpm || 0);
+  // shiftNowRpm and ledFillRpm are always provided by the backend (src/shift.rs);
+  // no client-side fallback computation — if absent, zero produces the "no data" state.
+  const shiftNowRpm = Math.max(0, engine.shiftNowRpm || 0);
+  const ledFillRpm  = Math.max(0, engine.ledFillRpm  || 0);
   return {
     maxRpm,
     limitRpm,
     redlineRpm,
     shiftNowRpm,
-    ratio: maxRpm > 0 ? clamp(rpm / maxRpm, 0, 1) : 0,
+    ledFillRpm,
+    ratio:       maxRpm    > 0 ? clamp(rpm / maxRpm,    0, 1)   : 0,
     redlineRatio: redlineRpm > 0 ? clamp(rpm / redlineRpm, 0, 1.2) : 0,
   };
 }
 
-function shiftFlashState(currentRpm, shiftNowRpm, gear) {
+// Returns true when shift math fields are absent from the payload — e.g. when
+// the PWA serves a stale cache while the backend is unreachable.  Never called
+// on the normal (connected) path; callers should show a "no data" state instead
+// of recomputing shift values.
+function isShiftDataMissing(engine) {
+  return !Number.isFinite(engine.shiftNowRpm) || engine.shiftNowRpm <= 0;
+}
+
+// releaseGap is engine.shiftFlashReleaseGap from the backend — the hysteresis
+// distance RPM must fall below shiftNowRpm before the flash resets.  Passing
+// 0 on missing data is safe: the condition rpm < shiftNow - 0 deactivates
+// immediately after a gear change, which is the correct recovery behaviour.
+function shiftFlashState(currentRpm, shiftNowRpm, releaseGap, gear) {
   if (!Number.isFinite(currentRpm) || !Number.isFinite(shiftNowRpm) || shiftNowRpm <= 0 || gear <= 0) {
     shiftFlashActive = false;
     shiftFlashGear = gear;
@@ -325,7 +254,6 @@ function shiftFlashState(currentRpm, shiftNowRpm, gear) {
     shiftFlashActive = false;
     shiftFlashGear = gear;
   }
-  const releaseGap = clamp(shiftNowRpm * 0.025, 180, 350);
   if (!shiftFlashActive && currentRpm >= shiftNowRpm) {
     shiftFlashActive = true;
   } else if (shiftFlashActive && currentRpm < shiftNowRpm - releaseGap) {
@@ -470,14 +398,18 @@ function render(now) {
   const rpmRatio = rpm.ratio;
   els.rpmFill.style.setProperty("--rpm-fill", `${rpmRatio * 100}%`);
   els.rpmFill.style.filter = rpmRatio > 0.92 ? "saturate(1.7) brightness(1.2)" : "";
-  // LEDs scale to 97 % of shiftNowRpm so the last LED lights up just before
-  // blinking starts (brief "all on, not yet blinking" state).
-  const ledFull = rpm.shiftNowRpm > 0 ? rpm.shiftNowRpm * 0.97 : 0;
-  const ledRatio = ledFull > 0
-    ? clamp(latest.engine.rpm / ledFull, 0, 1)
+  // ledFillRpm comes from the backend (engine.ledFillRpm = shiftNowRpm * 0.97):
+  // the last LED lights just before blinking starts ("all on, not yet blinking").
+  const ledRatio = rpm.ledFillRpm > 0
+    ? clamp(latest.engine.rpm / rpm.ledFillRpm, 0, 1)
     : clamp(rpm.redlineRatio, 0, 1);
   const activeLeds = Math.round(ledRatio * els.shiftLeds.length);
-  const shiftFlash = shiftFlashState(latest.engine.rpm, rpm.shiftNowRpm, latest.controls.gear);
+  const shiftFlash = shiftFlashState(
+    latest.engine.rpm,
+    rpm.shiftNowRpm,
+    latest.engine.shiftFlashReleaseGap || 0,
+    latest.controls.gear,
+  );
   checkShiftAudio();
   const shiftFlashOn = shiftFlash && Math.floor(now / 80) % 2 === 0;
   els.shiftLeds.forEach((led, index) => {

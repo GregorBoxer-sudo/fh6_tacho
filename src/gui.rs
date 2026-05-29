@@ -112,7 +112,10 @@ fn compute_led_state(
         *flash_gear = gear;
     }
 
-    let release_gap = clampf(shift_now * 0.025, 180.0, 350.0);
+    // Both thresholds come from the backend payload so the overlay and the web
+    // dashboard always use the same values — never recomputed here.
+    let release_gap = fv(&engine["shiftFlashReleaseGap"]).max(0.0);
+    let led_fill = fv(&engine["ledFillRpm"]);
     if !*flash_active && shift_now > idle + 1000.0 && rpm >= shift_now {
         *flash_active = true;
     }
@@ -120,14 +123,8 @@ fn compute_led_state(
         *flash_active = false;
     }
 
-    // LEDs fill up to 97 % of shiftNowRpm (brief "all on, not blinking" state)
-    let led_full = if shift_now > idle + 1000.0 {
-        shift_now * 0.97
-    } else {
-        0.0
-    };
-    let led_ratio = if led_full > 0.0 {
-        clampf(rpm / led_full, 0.0, 1.0)
+    let led_ratio = if led_fill > 0.0 {
+        clampf(rpm / led_fill, 0.0, 1.0)
     } else if redline > 0.0 {
         clampf(rpm / redline, 0.0, 1.0)
     } else {

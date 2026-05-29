@@ -1002,7 +1002,7 @@ pub(crate) fn enrich_shift_data(payload: &mut Value, power_curves: Option<&Arc<P
     engine.insert("limitRpm".to_string(), json!(limit_rpm));
     engine.insert("redlineRpm".to_string(), json!(redline_rpm));
     engine.insert("observedLimitRpm".to_string(), json!(observed_limit));
-    // observed_limit ist bereits maxObservedRpm nach allen Bounce-Korrekturen.
+    // observed_limit is already maxObservedRpm after all bounce corrections.
     engine.insert("confirmedLimiterRpm".to_string(), json!(observed_limit));
     // Running bounce counter: 0 = outside limiter zone, 1-2 = being detected,
     // 3 = confirmed (immediately reset to 0, so the next frame reads 0 again).
@@ -1022,6 +1022,20 @@ pub(crate) fn enrich_shift_data(payload: &mut Value, power_curves: Option<&Arc<P
         json!(warned_learned_shift_rpm.unwrap_or(0.0)),
     );
     engine.insert("shiftNowRpm".to_string(), json!(shift_now_rpm));
+    // LED bar fills to this RPM; 97 % of the shift point gives a brief
+    // "all on, not yet flashing" visual state before the threshold is crossed.
+    engine.insert("ledFillRpm".to_string(), json!(shift_now_rpm * 0.97));
+    // Hysteresis gap for the flash state machine: once the flash activates,
+    // RPM must drop this far below shiftNowRpm before the flash resets.
+    // Clamped so the gap is never trivially small (180) or absurdly large (350).
+    engine.insert(
+        "shiftFlashReleaseGap".to_string(),
+        json!((shift_now_rpm * 0.025).clamp(180.0, 350.0)),
+    );
+    // Which path produced the shift point: "safety" (conservative fallback),
+    // "learned" (optimal power-curve shift), or "learned_capped" (optimal but
+    // capped below safety because the learned value was too aggressive).
+    engine.insert("source".to_string(), json!(shift_source));
     engine.insert(
         "shiftWarningLeadSeconds".to_string(),
         json!(warning_lead_seconds),
